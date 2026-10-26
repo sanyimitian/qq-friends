@@ -1,0 +1,6 @@
+pywinauto
+pywin32
+pyautogui
+openpyxl
+odfpy
+rapidocr-onnxruntime

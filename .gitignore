@@ -1,0 +1,15 @@
+.venv/
+.setup-cache/
+__pycache__/
+*.pyc
+qq_member_numbers.xlsx
+*.bak.ods
+*.original.bak
+*.before_gui.bak
+build/
+dist/
+*.log
+*.lnk
+.env
+.env.*
+!.env.example

@@ -1,0 +1,32 @@
+{
+  "ui_0.json": {
+    "mode": "capture",
+    "worker_started": true,
+    "stopped": true,
+    "result": {
+      "status": "stopped",
+      "message": "任务已停止，已保存的数据保留。",
+      "exit_code": 130,
+      "forced": false
+    },
+    "config_saved": true
+  },
+  "ui_1.json": {
+    "mode": "add",
+    "worker_started": true,
+    "stopped": true,
+    "result": {
+      "status": "stopped",
+      "message": "任务已停止，已保存的数据保留。",
+      "exit_code": 130,
+      "forced": false
+    },
+    "config_saved": true
+  },
+  "dependencies.json": {
+    "imports": true,
+    "ocr": true,
+    "xlsx_ods": true,
+    "ok": true
+  }
+}

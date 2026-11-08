@@ -73,7 +73,7 @@ class WorkflowHarness:
         self.events.append(('search', number))
         return 'no_results', 1
 
-    def _mark(self, document, sheet, rows, *args):
+    def _mark(self, document, sheet, rows, *args, **kwargs):
         self.events.append(('mark', tuple(rows)))
 
     def __enter__(self):
@@ -85,6 +85,7 @@ class WorkflowHarness:
             'AttemptJournal': Mock(return_value=self.journal),
             'current_sheet_numbers': Mock(return_value={number for number, _ in self.numbers}),
             'prepare_verification_form': Mock(return_value=self.form),
+            'close_submitted_form': Mock(),
             'cancel_unconfigured_form': Mock(return_value=True),
             'load_dependencies': Mock(return_value=self.dependencies),
             'find_qq_windows': Mock(return_value=self.windows),
@@ -352,7 +353,14 @@ class MainWorkflowTests(unittest.TestCase):
                      form=harness.form, expected_number=number)
                 for number, _ in harness.numbers[1:3]])
             self.assertEqual([item.args[2] for item in harness.mark_rows_processed.call_args_list],
-                             [[2], [3]])
+                             [[1], [2], [3]])
+            self.assertEqual(
+                harness.mark_rows_processed.call_args_list[0].kwargs,
+                {
+                    'reason': '申请页没有验证信息输入框，已取消且未发送',
+                    'mark_processed': False,
+                },
+            )
             self.assertEqual(harness.journal.record.call_args_list, [
                 item for number, rows in harness.numbers[1:3]
                 for item in (call(number, rows, 'sending'), call(number, rows, 'processed'))])

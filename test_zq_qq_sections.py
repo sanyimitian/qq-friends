@@ -2,7 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from openpyxl import Workbook
 
@@ -43,11 +43,24 @@ class Control:
             result.extend(child.descendants())
         return result
 
+    def children(self):
+        return list(self._children)
+
     def is_visible(self):
         return True
 
     def rectangle(self):
         return self._rect
+
+
+class DesktopWindow(Control):
+    def __init__(self, name, kind, children=(), handle=1, process_id=100):
+        super().__init__(name, kind, children)
+        self.handle = handle
+        self._process_id = process_id
+
+    def process_id(self):
+        return self._process_id
 
 
 def profile_window(group_name="测试群", group_number="123456789", member_count="(460人)"):
@@ -96,6 +109,87 @@ class GroupNumberDetectionTests(unittest.TestCase):
         window = Control("QQ", "Window", [first, second])
         with self.assertRaises(RuntimeError):
             script.find_group_number_in_profile(window, "测试群")
+
+    def test_reads_group_number_when_header_text_is_nested_or_duplicated(self):
+        cases = (
+            ([], "header"),
+            ([Control("测试群", "Text"), Control("测试群", "Text")], "header"),
+            ([Control("测试群", "Text")], "name"),
+        )
+        for children, expected_target in cases:
+            with self.subTest(expected_target=expected_target, child_count=len(children)):
+                header = Control("测试群 (460)", "Button", children)
+                header.click_input = Mock()
+                for child in children:
+                    child.click_input = Mock()
+                main = Control("QQ", "Window")
+                clock = SimpleNamespace(monotonic=lambda: 0.0, sleep=Mock())
+                with patch.object(script, "find_group_number_in_profile",
+                                  side_effect=[None, "123456789"]), \
+                        patch.object(script, "get_group_header_button", return_value=header), \
+                        patch.object(script, "time", clock):
+                    self.assertEqual(
+                        script.read_group_number_from_profile(main, "测试群"),
+                        "123456789",
+                    )
+                if expected_target == "header":
+                    header.click_input.assert_called_once_with()
+                    for child in children:
+                        child.click_input.assert_not_called()
+                else:
+                    children[0].click_input.assert_called_once_with()
+                    header.click_input.assert_not_called()
+
+    def test_reads_unique_number_from_new_top_level_profile_card(self):
+        main = DesktopWindow("QQ", "Window")
+        card = DesktopWindow(
+            "资料卡", "Window", [Control("2152042795", "Text")], handle=2
+        )
+        header = Control("测试群 (460)", "Button")
+        visible = {"card": False}
+        header.click_input = Mock(side_effect=lambda: visible.__setitem__("card", True))
+        desktop = SimpleNamespace(
+            windows=lambda: [main, *([card] if visible["card"] else [])]
+        )
+        clock = SimpleNamespace(monotonic=lambda: 0.0, sleep=Mock())
+        with patch.object(script, "find_group_number_in_profile", return_value=None), \
+                patch.object(script, "get_group_header_button", return_value=header), \
+                patch.object(script, "time", clock):
+            self.assertEqual(
+                script.read_group_number_from_profile(main, "测试群", desktop),
+                "2152042795",
+            )
+
+    def test_does_not_reuse_an_unchanged_existing_profile_card(self):
+        main = DesktopWindow("QQ", "Window")
+        card = DesktopWindow(
+            "资料卡", "Window", [Control("3805745874", "Text")], handle=2
+        )
+        desktop = SimpleNamespace(windows=lambda: [main, card])
+        previous = script.profile_card_number_snapshot(main, desktop)
+        self.assertEqual(
+            script.find_new_group_number_in_profile_card(main, desktop, previous),
+            None,
+        )
+
+
+class JoinedGroupOrderingTests(unittest.TestCase):
+    def test_visible_joined_group_rows_are_returned_top_to_bottom(self):
+        category = Control("我加入的群聊 3", "Button", rect=(10, 300, 250, 330))
+        pane = Control("联系人列表", "Pane", [
+            Control("第三个群", "Button", rect=(20, 210, 250, 255)),
+            Control("我创建的群聊", "Button", rect=(10, 270, 250, 300)),
+            Control("第一个群", "Button", rect=(20, 100, 250, 145)),
+            Control("我加入的群聊 3", "Button", rect=(10, 300, 250, 330)),
+            Control("第二个群", "Button", rect=(20, 155, 250, 200)),
+        ], rect=(0, 0, 300, 800))
+        window = Control("QQ", "Window", [pane])
+
+        with patch.object(script, "get_contact_group_list", return_value=pane), \
+                patch.object(script, "get_joined_groups_category", return_value=category):
+            rows = script.collect_joined_group_rows(window, (0, 0, 1200, 800))
+
+        self.assertEqual([name for name, _ in rows], ["第一个群", "第二个群", "第三个群"])
 
 
 class WorkbookSectionTests(unittest.TestCase):

@@ -3,10 +3,14 @@
 import re
 import unittest
 from dataclasses import dataclass
+from itertools import count
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import zq_qq as capture
+import zq_qq_001 as capture
+
+
+_control_runtime_ids = count(1)
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,9 @@ class Rectangle:
 class Control:
     def __init__(self, name='', kind='Group', children=(), rect=(100, 100, 400, 160)):
         self.name = name
-        self.element_info = SimpleNamespace(control_type=kind)
+        self.element_info = SimpleNamespace(
+            control_type=kind, runtime_id=(next(_control_runtime_ids),)
+        )
         self._children = list(children)
         self._rectangle = Rectangle(*rect)
 
@@ -38,6 +44,9 @@ class Control:
 
     def rectangle(self):
         return self._rectangle
+
+    def is_visible(self):
+        return True
 
     def descendants(self, control_type=None):
         result = []
@@ -200,6 +209,39 @@ class HeaderDetectionTests(unittest.TestCase):
         header = Control('测试群 [123]', 'Button')
         with patch.object(capture, 'GROUP_HEADER_PATTERN', re.compile(r'\[\d+\]$')):
             self.assertIs(capture.get_group_header_button(window(header), '测试群'), header)
+
+
+class ContactGroupNavigationTests(unittest.TestCase):
+    def test_collects_only_visible_joined_group_buttons(self):
+        category = Control('我加入的群聊 26', 'Button', rect=(100, 100, 350, 136))
+        group = Control('目标群', 'Button', rect=(100, 136, 350, 200))
+        hidden = Control('屏幕外群', 'Button', rect=(100, 850, 350, 914))
+        other_category = Control('我创建的群聊 1', 'Button', rect=(100, 914, 350, 950))
+        pane = Control('联系人列表', 'Pane', [category, group, hidden, other_category],
+                       rect=(100, 80, 360, 800))
+        rows = capture.collect_joined_group_rows(window(pane), (0, 0, 1200, 800))
+        self.assertEqual(rows, [('目标群', group)])
+
+    def test_profile_page_requires_exact_name_group_number_and_member_marker(self):
+        page = Control('QQ', 'Window', [
+            Control('目标群', 'Text', rect=(500, 140, 600, 165)),
+            Control('群号', 'Text', rect=(500, 170, 528, 188)),
+            Control('123456789', 'Text', rect=(527, 170, 600, 188)),
+            Control('群成员 (672人)', 'Text', rect=(450, 480, 550, 500)),
+            Control('发送群聊消息', 'Button', rect=(650, 700, 780, 740)),
+        ])
+        details = capture.find_group_profile_details(page, '目标群')
+        self.assertEqual(details[0], '123456789')
+        self.assertEqual(details[1].window_text(), '发送群聊消息')
+
+    def test_profile_page_rejects_wrong_name_or_missing_group_members(self):
+        page = Control('QQ', 'Window', [
+            Control('其他群', 'Text', rect=(500, 140, 600, 165)),
+            Control('群号', 'Text', rect=(500, 170, 528, 188)),
+            Control('123456789', 'Text', rect=(527, 170, 600, 188)),
+            Control('发送群聊消息', 'Button', rect=(650, 700, 780, 740)),
+        ])
+        self.assertIsNone(capture.find_group_profile_details(page, '目标群'))
 
 
 class MemberPanelDetectionTests(unittest.TestCase):

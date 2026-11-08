@@ -9,7 +9,8 @@ from unittest.mock import patch
 import gui_config
 
 
-EXPECTED_DEFAULT = '您好，0.18稳定不降智中转免费送额度，欢迎来试，地址看头像'
+EXPECTED_DEFAULT = 'GP七0.1倍率，看头像，q群管理员有试用额度'
+EXPECTED_QUESTION_ANSWER = 'GP七0.1倍率，看头像，q群管理员有试用额度'
 
 
 class VerificationSettingsTests(unittest.TestCase):
@@ -55,6 +56,28 @@ class VerificationSettingsTests(unittest.TestCase):
     def test_empty_message_is_rejected(self):
         with self.assertRaisesRegex(ValueError, '加好友验证信息.*不能为空'):
             gui_config.validate('add', {'VERIFICATION_MESSAGE': ' \n '})
+
+    def test_uniform_question_answer_is_optional_persistent_and_editable(self):
+        import tkinter as tk
+        answer = '统一回答内容'
+        self.assertEqual(gui_config.validate('add', {})['QUESTION_ANSWER'], EXPECTED_QUESTION_ANSWER)
+        self.assertEqual(gui_config.validate('add', {'QUESTION_ANSWER': ''})['QUESTION_ANSWER'], '')
+        gui_config.save_config('add', {'QUESTION_ANSWER': answer})
+        app = self.make_app()
+        widget = app.inputs['QUESTION_ANSWER']
+        self.assertIsInstance(widget, tk.Text)
+        self.assertEqual(widget.get('1.0', 'end-1c'), answer)
+        self.assertEqual(app.collect()['QUESTION_ANSWER'], answer)
+        module = SimpleNamespace()
+        gui_config.apply_config('add', module, app.collect())
+        self.assertEqual(module.QUESTION_ANSWER, answer)
+        app.set_busy(True)
+        self.assertEqual(str(widget.cget('state')), 'disabled')
+        app.set_busy(False)
+        self.assertEqual(str(widget.cget('state')), 'normal')
+        app.reset()
+        self.assertEqual(app.collect()['QUESTION_ANSWER'], EXPECTED_QUESTION_ANSWER)
+
 
     def make_app(self):
         import tkinter as tk

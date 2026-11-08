@@ -115,12 +115,19 @@ class DesktopTests(unittest.TestCase):
         with patch.object(adding, 'NUMBER_FILE_PATH', path):
             numbers, doc, active, _ = adding.read_number_rows(load, Table, TableRow, TableCell, extractText)
             self.assertEqual(numbers, [('123456789', [1])])
-            adding.mark_rows_processed(doc, active, [1], TableRow, TableCell, P, path)
+            adding.mark_rows_processed(
+                doc, active, [1], TableRow, TableCell, P, path,
+                reason='搜索结果中没有可点击的添加按钮',
+            )
             check = load(str(path))
             check_row = check.spreadsheet.getElementsByType(Table)[0].getElementsByType(TableRow)[0]
             cells = check_row.getElementsByType(TableCell)
             self.assertEqual(adding.normalize_cell_value(cells[1], extractText), '群名称+群号')
             self.assertEqual(adding.normalize_cell_value(cells[2], extractText), adding.PROCESSED_MARKER)
+            self.assertEqual(
+                adding.normalize_cell_value(cells[3], extractText),
+                '加好友跳过原因：搜索结果中没有可点击的添加按钮',
+            )
             self.assertEqual(adding.read_number_rows(load, Table, TableRow, TableCell, extractText)[0], [])
 
     def await_result(self, controller, timeout=12):

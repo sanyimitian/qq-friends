@@ -9,14 +9,18 @@ import time
 from copy import deepcopy
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from task_control import atomic_save
+from task_control import atomic_save, check_stop
 from add_progress import AttemptJournal, ensure_number_file_writable
-from gui_config import DEFAULT_VERIFICATION_MESSAGE
+from excel_number_queue import ExcelNumberQueue
+from gui_config import DEFAULT_QUESTION_ANSWER, DEFAULT_VERIFICATION_MESSAGE
+from qq_question_answer import prepare_verification_form, click_verified_send
 from qq_verification import (
     NoVerificationField,
+    SendUnconfirmed,
+    SendRejected,
+    close_submitted_form,
     cancel_unconfigured_form,
-    prepare_verification_form,
-    click_verified_send,
+
 )
 
 # QQ 客户端位置、窗口标题和页面入口名称；客户端路径变化时修改 QQ_EXE。
@@ -48,8 +52,8 @@ STATIC_PAGE_TEXTS = {
     "运动",
 }
 WORKSPACE_DIR = Path(__file__).resolve().parents[1]
-# 支持 XLSX 或 ODS 完整路径；保留旧脚本默认值，桌面程序默认选择采集的 XLSX。
-NUMBER_FILE_PATH = WORKSPACE_DIR / "号码.ods"
+# 支持 XLSX 或 ODS 完整路径；默认使用桌面指定的号码表。
+NUMBER_FILE_PATH = Path.home() / 'Desktop' / 'qq_member_numbers1.xlsx'
 # 以下文本集合用于识别页面状态及可点击操作按钮。
 NO_RESULT_MARKERS = (
     "没有找到",
@@ -73,6 +77,7 @@ AVATAR_AUTO_DETECT = True
 MORE_MENU_TEXT = "更多"
 TARGET_PROCESS_ID = 0
 AUTO_SEND = True
+QUESTION_ANSWER = DEFAULT_QUESTION_ANSWER
 VERIFICATION_MESSAGE = DEFAULT_VERIFICATION_MESSAGE
 NUMBER_INTERVAL_SECONDS = 1.0
 SEND_TIMEOUT_SECONDS = 5.0
@@ -84,6 +89,7 @@ NUMBERS_PER_ACCOUNT = 3
 EXCLUDED_QQ_ACCOUNTS = {}
 # 写入号码表 C 列的完成标记，下次启动时据此跳过对应号码。
 PROCESSED_MARKER = "已处理"
+SKIP_REASON_PREFIX = "加好友跳过原因："
 
 
 # 延迟导入桌面自动化和 ODS 依赖，缺少依赖时给出安装命令。
@@ -102,6 +108,8 @@ def load_dependencies():
             "缺少桌面自动化依赖，请运行："
             "python -m pip install pywinauto pywin32 pyautogui odfpy"
         ) from error
+    from qq_uia_compat import install_uia_wrapper_fix
+    install_uia_wrapper_fix()
     return (
         Desktop,
         pyautogui,
@@ -305,11 +313,55 @@ def find_more_menu_item(desktop, process_id, window=None):
 # 恢复并激活指定窗口，使后续 UI 自动化操作作用于正确窗口。
 def activate_window(window, win32con, win32gui):
     handle = window.handle
-    if win32gui.IsIconic(handle):
-        win32gui.ShowWindow(handle, win32con.SW_RESTORE)
-    win32gui.BringWindowToTop(handle)
-    win32gui.SetForegroundWindow(handle)
-    time.sleep(0.8)
+    last_error = None
+
+    def ready():
+        return (win32gui.IsWindow(handle) and win32gui.IsWindowVisible(handle)
+                and not win32gui.IsIconic(handle)
+                and win32gui.GetForegroundWindow() == handle)
+
+    def attempt_action(action):
+        nonlocal last_error
+        check_stop()
+        try:
+            action()
+        except Exception as error:
+            if type(error).__name__ == 'FailSafeException':
+                raise
+            last_error = error
+
+    for attempt in range(1, 4):
+        check_stop()
+        if not win32gui.IsWindow(handle):
+            raise RuntimeError('QQ 窗口已失效，请重新显示或选择已登录的 QQ 窗口。')
+        if ready():
+            return
+        if win32gui.IsIconic(handle) or not win32gui.IsWindowVisible(handle):
+            attempt_action(lambda: win32gui.ShowWindow(handle, win32con.SW_RESTORE))
+        # Windows may reject foreground activation even with error code zero.
+        # Try the UI Automation fallback, then verify the actual foreground.
+        attempt_action(lambda: win32gui.BringWindowToTop(handle))
+        attempt_action(lambda: win32gui.SetForegroundWindow(handle))
+        if not ready():
+            attempt_action(window.set_focus)
+        deadline = time.monotonic() + 0.8
+        while True:
+            check_stop()
+            if ready():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.1, remaining))
+        if attempt < 3:
+            print(f'QQ 窗口暂未切换到前台，正在重试（{attempt + 1}/3）。', flush=True)
+            time.sleep(0.5)
+
+    raise RuntimeError(
+        '尝试 3 次后仍无法将目标 QQ 窗口切换到前台。'
+        '请手动打开该 QQ 主窗口，关闭弹出的菜单或对话框后重试；'
+        '为避免操作错账号，本次已停止。'
+    ) from last_error
 
 
 # 切换账号时最小化其他主窗口，并确认目标窗口确实处于前台。
@@ -425,92 +477,191 @@ def find_own_avatar(window):
     return header_candidates[0] if len(header_candidates) == 1 else None
 
 
+def own_profile_roots(window, desktop):
+    """Inspect the selected process, prioritizing its standalone profile card."""
+    process_id = window.process_id()
+    try:
+        tops = desktop.windows(process=process_id)
+    except TypeError:
+        tops = desktop.windows()
+    names = {'资料卡', '个人资料', '我的资料'}
+    visible = []
+    for top in tops:
+        check_stop()
+        try:
+            if top.process_id() == process_id and top.is_visible():
+                visible.append(top)
+        except Exception:
+            continue
+    standalone = [top for top in visible if top.window_text().strip() in names]
+    if standalone:
+        return standalone
+    nested = []
+    for top in visible:
+        check_stop()
+        try:
+            nested.extend(c for c in top.descendants()
+                          if c.is_visible() and c.window_text().strip() in names)
+        except Exception:
+            continue
+    return nested
+
+
 def find_own_profile_account(window, desktop=None):
     """只读当前进程的本人资料卡；兼容独立窗口及分开的 QQ 标签和号码。"""
     if desktop is None:
         from pywinauto import Desktop
         desktop = Desktop(backend='uia')
-    process_id = window.process_id()
-    profile_names = {'资料卡', '个人资料', '我的资料'}
     combined_pattern = re.compile(r'QQ\s*(?:号|号码)?\s*[:：]?\s*([0-9]{5,12})', re.IGNORECASE)
     label_pattern = re.compile(r'QQ\s*(?:号|号码)?\s*[:：]?', re.IGNORECASE)
     accounts = set()
-    for top in desktop.windows():
+    for scope in own_profile_roots(window, desktop):
         try:
-            if top.process_id() != process_id or not top.is_visible():
+            controls = [control for control in scope.descendants() if control.is_visible()]
+            if not any(control.element_info.control_type == 'Button'
+                       and control.window_text().strip() in {'编辑资料', '修改资料'}
+                       for control in controls):
                 continue
-            scopes = [control for control in [top, *top.descendants()]
-                      if control.is_visible() and control.window_text().strip() in profile_names]
         except Exception:
             continue
-        for scope in scopes:
+        for control in controls:
             try:
-                controls = [control for control in scope.descendants() if control.is_visible()]
-                if not any(control.element_info.control_type == 'Button'
-                           and control.window_text().strip() in {'编辑资料', '修改资料'}
-                           for control in controls):
+                if control.element_info.control_type not in {'Text', 'Edit'}:
                     continue
+                name = control.window_text().strip()
+                match = combined_pattern.fullmatch(name)
+                if match:
+                    accounts.add(match.group(1))
+                    continue
+                if not label_pattern.fullmatch(name):
+                    continue
+                label_rect = control.rectangle()
+                parent = control.parent()
+                if parent is None:
+                    continue
+                for sibling in parent.children():
+                    if (not sibling.is_visible()
+                            or sibling.element_info.control_type not in {'Text', 'Edit'}):
+                        continue
+                    number = sibling.window_text().strip()
+                    if not re.fullmatch(r'[0-9]{5,12}', number):
+                        continue
+                    rect = sibling.rectangle()
+                    overlap = min(label_rect.bottom, rect.bottom) - max(label_rect.top, rect.top)
+                    height = min(label_rect.bottom - label_rect.top, rect.bottom - rect.top)
+                    # QQ 当前版本的两块文字边界有 1 像素重叠。只接受同一行右侧的号码。
+                    if (height > 0 and overlap >= height * 0.5
+                            and -3 <= rect.left - label_rect.right <= max(80, height * 6)):
+                        accounts.add(number)
             except Exception:
                 continue
-            for control in controls:
-                try:
-                    if control.element_info.control_type not in {'Text', 'Edit'}:
-                        continue
-                    name = control.window_text().strip()
-                    match = combined_pattern.fullmatch(name)
-                    if match:
-                        accounts.add(match.group(1))
-                        continue
-                    if not label_pattern.fullmatch(name):
-                        continue
-                    label_rect = control.rectangle()
-                    parent = control.parent()
-                    if parent is None:
-                        continue
-                    for sibling in parent.children():
-                        if (not sibling.is_visible()
-                                or sibling.element_info.control_type not in {'Text', 'Edit'}):
-                            continue
-                        number = sibling.window_text().strip()
-                        if not re.fullmatch(r'[0-9]{5,12}', number):
-                            continue
-                        rect = sibling.rectangle()
-                        overlap = min(label_rect.bottom, rect.bottom) - max(label_rect.top, rect.top)
-                        height = min(label_rect.bottom - label_rect.top, rect.bottom - rect.top)
-                        # QQ 当前版本的两块文字边界有 1 像素重叠。只接受同一行右侧的号码。
-                        if (height > 0 and overlap >= height * 0.5
-                                and -3 <= rect.left - label_rect.right <= max(80, height * 6)):
-                            accounts.add(number)
-                except Exception:
-                    continue
     if len(accounts) > 1:
         raise RuntimeError('同一 QQ 进程检测到多个不同的本人账号，无法确认账号，请关闭多余资料卡后重试。')
     return next(iter(accounts), None)
 
 
-# 复用已打开的本人资料卡，必要时只点击一次头像；此处不搜索或添加好友。
+def wait_own_profile_account(window, desktop, seconds):
+    """Keep the pointer still; give a newly opened card time to load."""
+    deadline = time.monotonic() + seconds
+    loading_deadline = None
+    while True:
+        check_stop()
+        account = find_own_profile_account(window, desktop)
+        if account is not None:
+            return account
+        now = time.monotonic()
+        if loading_deadline is None and own_profile_roots(window, desktop):
+            loading_deadline = now + max(20.0, float(PAGE_TIMEOUT_SECONDS))
+            deadline = max(deadline, loading_deadline)
+            print('本人资料卡已显示，继续等待 QQ 号码加载，不重复点击头像。', flush=True)
+        if now >= deadline:
+            return None
+        time.sleep(min(0.25, deadline - now))
+
+
+def hover_own_avatar(window, avatar, pyautogui):
+    """Re-enter the confirmed own avatar without clicking another control."""
+    rect, area = window.rectangle(), avatar.rectangle()
+    if not (rect.left <= area.left < area.right <= rect.right
+            and rect.top <= area.top < area.bottom <= rect.bottom):
+        raise RuntimeError('本人头像位置已变化，等待重新定位。')
+    center = ((area.left + area.right) // 2, (area.top + area.bottom) // 2)
+    away = (min(rect.right - 2, area.right + 80),
+            min(rect.bottom - 2, area.bottom + 40))
+    check_stop()
+    pyautogui.moveTo(*away, duration=0.2)
+    time.sleep(0.6)
+    check_stop()
+    pyautogui.moveTo(*center, duration=0.3)
+
+
+# 点击与长悬停分轮重试；只操作本人头像，不搜索或添加好友。
 def read_qq_account_from_avatar(window, pyautogui, win32con, win32gui, desktop=None):
     if desktop is None:
         from pywinauto import Desktop
         desktop = Desktop(backend='uia')
-    account = find_own_profile_account(window, desktop)
-    if account is not None:
-        return account
-    activate_window(window, win32con, win32gui)
-    avatar = find_own_avatar(window)
-    if avatar is None:
-        raise RuntimeError(f'QQ 进程 {window.process_id()} 中未找到本人头像，请显示主窗口左上角账号栏。')
-
-    avatar.click_input()
-    deadline = time.monotonic() + AVATAR_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        check_stop()
         account = find_own_profile_account(window, desktop)
         if account is not None:
             return account
-        time.sleep(0.2)
+        print(f'读取本人 QQ 号：第 {attempt}/{attempts} 轮尝试。', flush=True)
+        if own_profile_roots(window, desktop):
+            account = wait_own_profile_account(window, desktop, max(20.0, float(PAGE_TIMEOUT_SECONDS)))
+            if account is not None:
+                return account
+            continue
+        activate_window(window, win32con, win32gui)
+        # Restoring focus may reveal an already opened or loading card.
+        account = find_own_profile_account(window, desktop)
+        if account is not None:
+            return account
+        if own_profile_roots(window, desktop):
+            account = wait_own_profile_account(window, desktop, max(20.0, float(PAGE_TIMEOUT_SECONDS)))
+            if account is not None:
+                return account
+            continue
+        avatar = find_own_avatar(window)
+        if avatar is None:
+            print('本人头像暂未显示，等待账号栏加载后重试。', flush=True)
+            time.sleep(1.0)
+            continue
+        try:
+            check_stop()
+            avatar.click_input()
+        except Exception as error:
+            if type(error).__name__ == 'FailSafeException':
+                raise
+            print('头像点击未完成，稍后重新定位并尝试悬停。', flush=True)
+        account = wait_own_profile_account(window, desktop, max(5.0, float(AVATAR_TIMEOUT_SECONDS)))
+        if account is not None:
+            return account
+        if own_profile_roots(window, desktop):
+            continue
+        avatar = find_own_avatar(window)
+        if avatar is None:
+            continue
+        hover_seconds = max(20.0, float(AVATAR_TIMEOUT_SECONDS)) + (attempt - 1) * 3
+        print(f'资料卡尚未打开，重新移入本人头像并保持悬停，等待最多 {hover_seconds:g} 秒。', flush=True)
+        try:
+            hover_own_avatar(window, avatar, pyautogui)
+        except Exception as error:
+            if type(error).__name__ == 'FailSafeException':
+                raise
+            print('头像位置暂不可用，下一轮重新定位。', flush=True)
+            time.sleep(0.5)
+            continue
+        account = wait_own_profile_account(window, desktop, hover_seconds)
+        if account is not None:
+            return account
+    check_stop()
+    account = find_own_profile_account(window, desktop)
+    if account is not None:
+        return account
     raise RuntimeError(
-        f'点击 QQ 进程 {window.process_id()} 的头像后，未能读取本人资料卡中的 QQ 号。'
-        '请确认资料卡已打开并显示“编辑资料”和 QQ 号码。'
+        f'QQ 进程 {window.process_id()} 已经过 {attempts} 轮点击、悬停及延长等待，仍未能确认本人 QQ 号。'
+        '请检查主窗口和资料卡是否正常显示“编辑资料”及 QQ 号码；为避免用错账号，本次停止。'
     )
 
 
@@ -548,35 +699,14 @@ def cell_at_column(row, column_index, TableCell):
 
 
 def read_excel_number_rows(number_file):
-    """读取采集工具使用的活动工作表，保留公式、格式和其他工作表。"""
+    """按工作表标签顺序读取；号码全局去重并记录全部原始位置。"""
     from openpyxl import load_workbook
 
     document = load_workbook(number_file)
     try:
-        sheet = document.active
-        if sheet is None or not hasattr(sheet, 'iter_rows'):
-            raise ValueError('Excel 当前选中的不是数据工作表，请在 Excel 中选中号码表后保存。')
-        entries = {}
-        for row_index, (number_cell, _, status_cell) in enumerate(
-            sheet.iter_rows(min_col=1, max_col=3), start=1
-        ):
-            value = number_cell.value
-            if value is None or (isinstance(value, str) and not value.strip()):
-                continue
-            if number_cell.data_type == 'f':
-                raise ValueError(f'第 {row_index} 行 A 列是公式，请粘贴为实际 QQ 号码值。')
-            if isinstance(value, float) and value.is_integer():
-                number = str(int(value))
-            else:
-                number = str(value).strip()
-            if not re.fullmatch(r'[0-9]{5,12}', number):
-                raise ValueError(f'第 {row_index} 行 A 列不是有效 QQ 号，请删除表头或修正号码。')
-            entry = entries.setdefault(number, {'rows': [], 'pending': False})
-            entry['rows'].append(row_index)
-            if str(status_cell.value or '').strip() != PROCESSED_MARKER:
-                entry['pending'] = True
-        numbers = [(number, entry['rows']) for number, entry in entries.items() if entry['pending']]
-        return numbers, document, sheet, number_file
+        queue = ExcelNumberQueue(document, number_file, PROCESSED_MARKER, SKIP_REASON_PREFIX)
+        document._qq_number_queue = queue
+        return queue.pending_numbers(), document, queue.first_sheet, number_file
     except BaseException:
         document.close()
         raise
@@ -712,13 +842,34 @@ def writable_cell_at_column(row, column_index, TableCell):
     return cell
 
 
-# 在号码所在行的 C 列写入“已处理”，并立即保存到号码文件。
+# 写入号码处理状态及可选跳过原因，并立即保存到号码文件。
 def mark_rows_processed(
-    document, sheet, row_indexes, TableRow, TableCell, Paragraph, number_file
+    document, sheet, row_indexes, TableRow, TableCell, Paragraph, number_file,
+    *, reason=None, mark_processed=True,
 ):
     if Path(number_file).suffix.lower() == '.xlsx':
+        queue = getattr(document, '_qq_number_queue', None)
+        if isinstance(queue, ExcelNumberQueue):
+            selected = set(row_indexes)
+            numbers = [number for number, rows in queue.entries[sheet.title].items()
+                       if selected.intersection(rows)]
+            if not numbers or selected - {row for number in numbers
+                                          for row in queue.entries[sheet.title][number]}:
+                raise ValueError('写回位置不属于当前工作表中的 QQ 号码，已停止。')
+            for number in numbers:
+                queue.mark(number, reason=reason, mark_processed=mark_processed)
+            return
         for row_index in row_indexes:
-            sheet.cell(row=row_index, column=3).value = PROCESSED_MARKER
+            if mark_processed:
+                sheet.cell(row=row_index, column=3).value = PROCESSED_MARKER
+            if reason:
+                cell = sheet.cell(row=row_index, column=4)
+                existing = str(cell.value or '').strip()
+                note = f'{SKIP_REASON_PREFIX}{reason}'
+                lines = [line for line in existing.splitlines()
+                         if not line.startswith(SKIP_REASON_PREFIX)]
+                lines.append(note)
+                cell.value = '\n'.join(lines)
         try:
             atomic_save(document, number_file)
         except PermissionError as error:
@@ -726,20 +877,62 @@ def mark_rows_processed(
         return
     for row_index in row_indexes:
         row = row_at_index(sheet, row_index, TableRow)
-        cell = writable_cell_at_column(row, 2, TableCell)
-        cell.setAttribute("valuetype", "string")
-        cell.setAttribute("stringvalue", PROCESSED_MARKER)
-        if cell.getAttribute("value") is not None:
-            cell.removeAttribute("value")
-        for child in list(cell.childNodes):
-            cell.removeChild(child)
-        cell.addElement(Paragraph(text=PROCESSED_MARKER))
+        if mark_processed:
+            cell = writable_cell_at_column(row, 2, TableCell)
+            cell.setAttribute("valuetype", "string")
+            cell.setAttribute("stringvalue", PROCESSED_MARKER)
+            if cell.getAttribute("value") is not None:
+                cell.removeAttribute("value")
+            for child in list(cell.childNodes):
+                cell.removeChild(child)
+            cell.addElement(Paragraph(text=PROCESSED_MARKER))
+        if reason:
+            from odf.teletype import extractText
+
+            cell = writable_cell_at_column(row, 3, TableCell)
+            existing = normalize_cell_value(cell, extractText)
+            lines = [line for line in existing.splitlines()
+                     if not line.startswith(SKIP_REASON_PREFIX)]
+            lines.append(f'{SKIP_REASON_PREFIX}{reason}')
+            note = '\n'.join(lines)
+            cell.setAttribute("valuetype", "string")
+            cell.setAttribute("stringvalue", note)
+            if cell.getAttribute("value") is not None:
+                cell.removeAttribute("value")
+            for child in list(cell.childNodes):
+                cell.removeChild(child)
+            for line in note.splitlines():
+                cell.addElement(Paragraph(text=line))
     atomic_save(document, number_file, ods=True)
+
+
+class SearchPageNotReady(RuntimeError):
+    """An incomplete UIA tree must never be interpreted as a search result."""
+
+
+def search_page_controls(page):
+    last_error = None
+    for attempt in range(3):
+        check_stop()
+        try:
+            controls = page.descendants()
+            if any(control.element_info.control_type is None for control in controls):
+                raise SearchPageNotReady('QQ 搜索页控件正在刷新，尚未完整加载。')
+            return controls
+        except KeyError as error:
+            if error.args != (None,):
+                raise
+            last_error = error
+        except SearchPageNotReady as error:
+            last_error = error
+        if attempt < 2:
+            time.sleep(0.15)
+    raise SearchPageNotReady('QQ 搜索页控件持续刷新，暂时无法完整读取，请稍后重试。') from last_error
 
 
 # 获取搜索框和“搜索”按钮；必要控件缺失时停止以避免错误操作。
 def get_search_controls(page):
-    controls = page.descendants()
+    controls = search_page_controls(page)
     inputs = [control for control in controls
               if control.element_info.control_type == 'Edit'
               and control.is_visible() and control.is_enabled()]
@@ -767,7 +960,7 @@ def select_user_tab(page):
     tab = next(
         (
             control
-            for control in page.descendants()
+            for control in search_page_controls(page)
             if control.element_info.control_type == "TabItem"
             and control.window_text().strip() == USER_TAB_TEXT
             and control.is_visible()
@@ -790,7 +983,7 @@ def read_search_page_text(page):
     # QQ 的 Document 名称可能为空或固定，结果文字实际位于其后代控件。
     texts = []
     seen = set()
-    for control in page.descendants():
+    for control in search_page_controls(page):
         try:
             if not control.is_visible():
                 continue
@@ -805,7 +998,7 @@ def read_search_page_text(page):
 
 # 判断搜索区域下方是否出现结果按钮，不限定按钮文字或可用状态。
 def has_result_button(page):
-    controls = page.descendants()
+    controls = search_page_controls(page)
     search_button = next(
         (
             control
@@ -845,7 +1038,7 @@ def invoke_page_button(page, button):
 
 def result_matches_number(page, number):
     """Match the number in result text below Search, never in the query input."""
-    search_buttons = [control for control in page.descendants()
+    search_buttons = [control for control in search_page_controls(page)
                       if control.element_info.control_type == 'Button'
                       and control.window_text().strip() == '搜索'
                       and control.is_visible() and control.is_enabled()]
@@ -854,7 +1047,7 @@ def result_matches_number(page, number):
     search_button = search_buttons[0]
     result_top = search_button.rectangle().bottom
     pattern = re.compile(r'(?<![0-9])' + re.escape(number) + r'(?![0-9])')
-    for control in page.descendants():
+    for control in search_page_controls(page):
         try:
             if (control.element_info.control_type == 'Text'
                     and control.is_visible() and control.rectangle().top >= result_top
@@ -872,7 +1065,7 @@ def click_result_add_button(page, expected_number=None):
         raise RuntimeError(f'当前搜索结果尚未显示 QQ 号 {expected_number}，未点击添加。')
     _, search_button = get_search_controls(page)
     result_top = search_button.rectangle().bottom
-    buttons = [control for control in page.descendants()
+    buttons = [control for control in search_page_controls(page)
                if control.element_info.control_type == 'Button'
                and control.window_text().strip() in RESULT_ACTIONS
                and control.is_visible() and control.is_enabled()
@@ -889,7 +1082,7 @@ def click_result_add_button(page, expected_number=None):
 def click_send_button(desktop, process_id, timeout=5, *, form=None, expected_number=None):
     if form is None:
         form = prepare_verification_form(desktop, process_id, VERIFICATION_MESSAGE,
-                                         PAGE_TIMEOUT_SECONDS, expected_number=expected_number)
+                                         PAGE_TIMEOUT_SECONDS, expected_number=expected_number, question_answer=QUESTION_ANSWER)
     return click_verified_send(form, process_id, VERIFICATION_MESSAGE, SEND_BUTTON_TEXT,
                                expected_number=expected_number, timeout=timeout)
 
@@ -911,7 +1104,7 @@ def has_user_result(page):
         control.element_info.control_type == "Text"
         and control.window_text().strip() == USER_TAB_TEXT
         and control.is_visible()
-        for control in page.descendants()
+        for control in search_page_controls(page)
     )
 
 
@@ -923,7 +1116,7 @@ def has_result_content(page):
         and control.window_text().strip()
         and control.window_text().strip() not in static_texts
         and control.is_visible()
-        for control in page.descendants()
+        for control in search_page_controls(page)
     )
 
 
@@ -941,17 +1134,30 @@ def wait_for_search_state(page, baseline, timeout, user_tab_selected, expected_n
     changed = False
     stable_text = None
     stable_since = None
+    refreshing = False
 
     while time.monotonic() < deadline:
-        text = read_search_page_text(page)
+        check_stop()
+        try:
+            text = read_search_page_text(page)
+            loading = any(marker in text for marker in LOADING_MARKERS)
+            result_button = has_result_button(page)
+            result_content = has_result_content(page)
+            user_result = has_user_result(page)
+            no_results = any(marker in text for marker in NO_RESULT_MARKERS)
+            target_matches = expected_number is None or result_matches_number(page, expected_number)
+        except SearchPageNotReady:
+            # Discard the whole observation; an incomplete tree is not no-results.
+            stable_text = None
+            stable_since = None
+            if not refreshing:
+                print('QQ 搜索页正在刷新，等待控件加载后重新读取。', flush=True)
+            refreshing = True
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+            continue
+        refreshing = False
         if text != baseline:
             changed = True
-        loading = any(marker in text for marker in LOADING_MARKERS)
-        result_button = has_result_button(page)
-        result_content = has_result_content(page)
-        user_result = has_user_result(page)
-        no_results = any(marker in text for marker in NO_RESULT_MARKERS)
-        target_matches = expected_number is None or result_matches_number(page, expected_number)
         result_detected = result_button or (
             user_tab_selected and result_content
         ) or (
@@ -995,6 +1201,7 @@ def search_number(page, number, user_tab_selected):
 
     for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
         page.set_focus()
+        search_input, search_button = get_search_controls(page)
         search_input.set_edit_text(number)
         time.sleep(0.2)
         if current_query(search_input) != number:
@@ -1082,23 +1289,48 @@ def main():
     )
     sheet_name = (number_sheet.title if Path(number_file).suffix.lower() == '.xlsx'
                   else number_sheet.getAttribute('name'))
-    journal = AttemptJournal(number_file, sheet_name, PROCESSED_MARKER)
+    queue = getattr(number_document, '_qq_number_queue', None)
+    if not isinstance(queue, ExcelNumberQueue):
+        queue = None
+    if queue is not None:
+        journal = AttemptJournal(number_file, sheet_name, PROCESSED_MARKER,
+                                 allowed_sheets=[sheet.title for sheet in queue.sheets])
+    else:
+        journal = AttemptJournal(number_file, sheet_name, PROCESSED_MARKER)
 
-    def save_marker(rows):
+
+    def save_marker(rows, reason=None, mark_processed=True):
+        options = {}
+        if reason is not None:
+            options['reason'] = reason
+        if not mark_processed:
+            options['mark_processed'] = False
         mark_rows_processed(number_document, number_sheet, rows,
-                            TableRow, TableCell, Paragraph, number_file)
+                            TableRow, TableCell, Paragraph, number_file,
+                            **options)
+
+    def recover_marker(rows, reason=None):
+        save_marker(rows, reason=reason)
 
     pending_before_recovery = len(numbers)
-    numbers = journal.recover(
-        numbers, save_marker,
-        all_numbers=current_sheet_numbers(number_sheet, number_file, TableRow, TableCell, extract_text),
-    )
+    if queue is not None:
+        numbers = queue.recover(journal, defer_uncertain=True)
+        print(f'按 Excel 标签顺序处理 {len(queue.sheets)} 张工作表；当前表处理完才进入下一张，跨表重复号码只处理一次。')
+    else:
+        numbers = journal.recover(
+            numbers, recover_marker,
+            all_numbers=current_sheet_numbers(number_sheet, number_file, TableRow, TableCell, extract_text),
+            defer_uncertain=lambda rows, reason: save_marker(rows, reason=reason, mark_processed=False),
+        )
     if len(numbers) < pending_before_recovery:
-        print(f'已补写上次未保存的 {pending_before_recovery - len(numbers)} 个号码标记，本次跳过这些号码。')
+        print(f'已恢复上次记录；本次跳过 {pending_before_recovery - len(numbers)} 个已处理或发送待核对的号码。')
     if not numbers:
-        print("没有待处理号码：号码列表为空或都已在 C 列标记为“已处理”。")
+        if journal.records:
+            print('剩余号码的发送状态待核对，请查看号码表 D 列；不会自动重发或进入下一张表。')
+        else:
+            print("没有待处理号码：号码列表为空或都已在 C 列标记为“已处理”。")
         return
-    if len(numbers) < NUMBERS_PER_ACCOUNT:
+    if queue is None and len(numbers) < NUMBERS_PER_ACCOUNT:
         print(
             f"剩余号码不足 {NUMBERS_PER_ACCOUNT} 个，按要求不处理并结束。"
         )
@@ -1107,16 +1339,21 @@ def main():
     no_result_count = 0
     ignored_result_count = 0
     timeout_numbers = []
+    uncertain_numbers = []
     processed_count = 0
+    last_sheet = None
     print(f"共读取到 {len(numbers)} 个不重复号码，每个账号处理 {NUMBERS_PER_ACCOUNT} 个。")
     for account_index, (account, account_window) in enumerate(accounts, start=1):
         remaining = len(numbers) - processed_count
-        if remaining < NUMBERS_PER_ACCOUNT:
+        if remaining <= 0:
+            break
+        if queue is None and remaining < NUMBERS_PER_ACCOUNT:
             print(
                 f"剩余号码 {remaining} 个，不足 {NUMBERS_PER_ACCOUNT} 个，按要求立即结束。"
             )
             break
 
+        batch_size = min(NUMBERS_PER_ACCOUNT, remaining)
         activate_qq_account_window(
             account_window, account_windows, win32con, win32gui
         )
@@ -1138,7 +1375,7 @@ def main():
         account_label = account if account is not None else f'所选窗口（进程 {account_window.process_id()}）'
         print(
             f"使用第 {account_index}/{len(accounts)} 个账号窗口 {account_label}，"
-            f"处理接下来的 {NUMBERS_PER_ACCOUNT} 个号码。"
+            f"处理接下来的 {batch_size} 个号码。"
         )
 
         window, page = open_add_friend_page(
@@ -1150,21 +1387,47 @@ def main():
         else:
             print("无法识别或切换“用户”选项，将只接受明确标注为用户的结果。")
 
-        batch_end = processed_count + NUMBERS_PER_ACCOUNT
+        batch_end = processed_count + batch_size
         while processed_count < batch_end:
             number, source_rows = numbers[processed_count]
+            if queue is not None:
+                title = queue.owners[number]
+                blocked = queue.blocked_before(title)
+                if blocked is not None:
+                    raise RuntimeError(
+                        f'工作表“{blocked}”仍有未处理号码，暂不进入下一张工作表。'
+                        '请核对该表 D 列原因，处理后重新开始。'
+                    )
+                number_sheet = number_document[title]
+                journal.select_sheet(title)
+                if title != last_sheet:
+                    if last_sheet is not None:
+                        print(f'工作表“{last_sheet}”已处理完，进入下一张有待处理号码的工作表。')
+                    position = next(i for i, sheet in enumerate(queue.sheets, 1) if sheet.title == title)
+                    print(f'当前工作表 {position}/{len(queue.sheets)}：“{title}”，待处理 {len(queue.pending_in_sheet(title))} 个号码。')
+                    last_sheet = title
             index = processed_count + 1
             print(f"账号 {account_label} 正在搜索第 {index}/{len(numbers)} 个号码：{number}。")
             state, attempts = search_number(page, number, user_tab_selected)
             processed_count += 1
+            skip_reason = None
+            submitted_form = None
             if state == "no_results":
                 no_result_count += 1
+                skip_reason = '搜索无结果'
                 print(f"第 {index} 个号码无搜索结果，继续下一个。")
             elif state == "ignored":
                 ignored_result_count += 1
+                skip_reason = '搜索结果不是明确的用户结果'
                 print(f"第 {index} 个号码的结果不是明确的用户结果，已忽略并继续。")
             elif state == "timeout":
                 timeout_numbers.append(number)
+                skip_reason = f'搜索超时，已重试 {attempts} 次'
+                if queue is not None:
+                    save_marker(source_rows, reason=skip_reason, mark_processed=False)
+                    print('搜索超时未标记完成；继续当前表，未处理完不进入下一张。')
+                    time.sleep(NUMBER_INTERVAL_SECONDS)
+                    continue
                 print(f"第 {index} 个号码搜索超时，已重试 {attempts} 次并记录，继续下一个。")
             else:
                 print(f"第 {index} 个号码的搜索结果已加载。")
@@ -1173,34 +1436,64 @@ def main():
                     try:
                         form = prepare_verification_form(
                             desktop, window.process_id(), VERIFICATION_MESSAGE, PAGE_TIMEOUT_SECONDS,
-                            expected_number=number,
+                            expected_number=number, question_answer=QUESTION_ANSWER,
                         )
                     except NoVerificationField as missing_field:
                         cancel_unconfigured_form(
                             missing_field.window, window.process_id(), number, SEND_TIMEOUT_SECONDS
                         )
+                        skip_reason = getattr(missing_field, 'reason', '申请页没有验证信息输入框，已取消且未发送')
+                        try:
+                            save_marker(source_rows, reason=skip_reason, mark_processed=False)
+                        except Exception as error:
+                            raise RuntimeError(
+                                f'无法保存 QQ 号 {number} 的跳过原因：{error}'
+                            ) from error
                         print(
-                            f'QQ 号 {number} 的申请页没有验证信息输入框；已取消，未发送且未标记。'
-                            '继续处理下一个号码。'
+                            f'QQ 号 {number}：{skip_reason}；未标记。'
+                            '已将原因写入号码表 D 列，继续处理下一个号码。'
                         )
                         time.sleep(NUMBER_INTERVAL_SECONDS)
                         continue
-                    print('已填写并核对页面配置的验证信息。')
+                    print('好友申请已准备并核对；无验证信息框时无需填写。')
                     if not AUTO_SEND:
                         print("自动发送已关闭，已填写申请表单；本次在此停止，该号码未标记。")
                         return
                     # 发送前落盘；即使此刻按停止，也不能在下次启动时无记录重发。
                     journal.record(number, source_rows, 'sending')
-                    if not click_send_button(desktop, window.process_id(), SEND_TIMEOUT_SECONDS,
-                                             form=form, expected_number=number):
-                        raise RuntimeError('未能点击申请表单中的发送，请核对该号码的申请状态。')
-                    print(f'QQ 号 {number}：已触发“发送”并确认申请窗口关闭，不代表对方已通过。')
+                    try:
+                        if not click_send_button(desktop, window.process_id(), SEND_TIMEOUT_SECONDS,
+                                                 form=form, expected_number=number):
+                            raise SendUnconfirmed('发送动作未确认，请核对该号码的申请状态。')
+                    except SendUnconfirmed as error:
+                        reason = f'发送待核对：{error}'
+                        journal.record(number, source_rows, 'sending', reason=reason)
+                        save_marker(source_rows, reason=reason, mark_processed=False)
+                        uncertain_numbers.append(number)
+                        print(f'QQ {number}：{reason}；已记录 D 列，未标记完成，不会重复发送。', flush=True)
+                        if isinstance(error, SendRejected) and error.halt_run:
+                            raise RuntimeError('QQ 提示频率限制或安全验证，已保留记录并停止；请在 QQ 中处理后再运行。') from error
+                        try:
+                            close_submitted_form(getattr(form, 'window', form), window.process_id(), number)
+                        except Exception as close_error:
+                            raise RuntimeError('发送结果已记录为待核对，但申请页无法安全关闭；请手动关闭后重新开始，同一号码不会重发。') from close_error
+                        print('已关闭本次申请页，继续当前工作表的其他号码。', flush=True)
+                        time.sleep(NUMBER_INTERVAL_SECONDS)
+                        continue
+                    submitted_form = getattr(form, 'window', form)
+                    print(f'QQ 号 {number}：已确认申请提交结束，不代表对方已通过。')
                 else:
+                    skip_reason = '搜索结果中没有可点击的添加按钮'
                     print(f"第 {index} 个号码结果已处理；没有可点击的“添加”按钮，跳过。")
 
-            journal.record(number, source_rows, 'processed')
+            if skip_reason:
+                journal.record(number, source_rows, 'processed', reason=skip_reason)
+            else:
+                journal.record(number, source_rows, 'processed')
+            if submitted_form is not None:
+                close_submitted_form(submitted_form, window.process_id(), number)
             try:
-                save_marker(source_rows)
+                save_marker(source_rows, reason=skip_reason)
             except Exception as error:
                 raise RuntimeError(
                     f'号码表保存失败：{error} 已保留 QQ 号 {number} 的本地处理记录；'
@@ -1209,6 +1502,8 @@ def main():
                 ) from error
             journal.clear(number)
             print(f"已在号码所在行的 C 列标记“{PROCESSED_MARKER}”。")
+            if skip_reason:
+                print(f'已在号码所在行的 D 列记录跳过原因：{skip_reason}。')
             time.sleep(NUMBER_INTERVAL_SECONDS)
 
     print(
@@ -1219,6 +1514,15 @@ def main():
     )
     if timeout_numbers:
         print("超时号码：" + ", ".join(timeout_numbers))
+    if uncertain_numbers:
+        print('发送待核对号码：' + ', '.join(uncertain_numbers) + '；已保留记录，未标记完成。')
+    if queue is not None:
+        pending = queue.pending_numbers()
+        if not pending:
+            print('所有工作表中的号码均已处理完。')
+        else:
+            title = queue.owners[pending[0][0]]
+            print(f'工作表“{title}”尚有待处理号码；下次开始继续该表，处理完才进入下一张。')
     print("脚本结束；QQ 保持在最后一个号码的搜索页面。")
 
 

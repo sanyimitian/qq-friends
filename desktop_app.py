@@ -8,7 +8,7 @@ import time
 
 from gui_config import fields, defaults, validate, load_config, save_config, state_home, config_path
 
-RUNNING_NOTICE = '请勿操作鼠标，等待程序执行完成。'
+RUNNING_NOTICE = '正在操作 QQ，请暂时不要使用鼠标和键盘。'
 
 
 class App:
@@ -26,120 +26,8 @@ class App:
         self.smoke_report = None
         self.smoke_stopped = False
         self.smoke_seen = False
-        title = 'QQ 群成员采集' if mode == 'capture' else 'QQ 好友添加'
-        root.title(title)
-        root.geometry('1040x820')
-        root.minsize(850, 650)
-        root.configure(background='#f1f5f9')
-        style = ttk.Style(root)
-        style.theme_use('clam')
-        style.configure('.', font=('Microsoft YaHei UI', 10))
-        style.configure('TFrame', background='#f1f5f9')
-        style.configure('TLabel', background='#f1f5f9', foreground='#172b4d')
-        style.configure('Hint.TLabel', foreground='#64748b', font=('Microsoft YaHei UI', 9))
-        style.configure('TButton', padding=(14, 8))
-        style.configure('Start.TButton', background='#2563eb', foreground='white', font=('Microsoft YaHei UI', 11, 'bold'))
-        style.map('Start.TButton', background=[('active', '#1d4ed8'), ('disabled', '#94a3b8')])
-        style.configure('Stop.TButton', background='#dc2626', foreground='white')
-        style.map('Stop.TButton', background=[('active', '#b91c1c'), ('disabled', '#94a3b8')])
-        header = tk.Frame(root, bg='#172b4d', padx=22, pady=15)
-        header.pack(fill='x')
-        tk.Label(header, text=title, font=('Microsoft YaHei UI', 21, 'bold'), bg='#172b4d', fg='white').pack(anchor='w')
-        subtitle = '设置采集范围与输出位置，开始后实时查看进度' if mode == 'capture' else '选择号码表与账号，按配置执行添加流程'
-        tk.Label(header, text=subtitle, font=('Microsoft YaHei UI', 10), bg='#172b4d', fg='#cbd5e1').pack(anchor='w', pady=(5, 0))
-        actions = ttk.Frame(root, padding=(16, 10))
-        actions.pack(fill='x')
-        self.start_button = ttk.Button(actions, text='▶  开始', style='Start.TButton', command=self.start)
-        self.start_button.pack(side='left')
-        self.stop_button = ttk.Button(actions, text='■  停止', style='Stop.TButton', command=self.stop, state='disabled')
-        self.stop_button.pack(side='left', padx=8)
-        self.status = tk.StringVar(value='就绪 · 配置后点击开始')
-        ttk.Label(actions, textvariable=self.status).pack(side='left', padx=12)
-        self.progress = ttk.Progressbar(actions, mode='indeterminate', length=130)
-        self.progress.pack(side='right')
-        self.running_notice = tk.Label(root, text=RUNNING_NOTICE,
-                                       font=('Microsoft YaHei UI', 12, 'bold'),
-                                       background='#fff3cd', foreground='#92400e',
-                                       anchor='w', padx=16, pady=12, wraplength=760)
-        body = ttk.Panedwindow(root, orient='vertical')
-        self.body = body
-        body.pack(fill='both', expand=True, padx=16, pady=(0, 12))
-        settings_frame = ttk.Frame(body)
-        body.add(settings_frame, weight=3)
-        toolbar = ttk.Frame(settings_frame)
-        toolbar.pack(fill='x', pady=(0, 8))
-        for label, callback in [('保存配置', self.save), ('恢复默认', self.reset), ('选择 QQ 窗口', self.choose_window), ('打开结果目录', self.open_output)]:
-            button = ttk.Button(toolbar, text=label, command=callback)
-            button.pack(side='left', padx=(0, 6))
-            self.edit_widgets.append(button)
-        if mode == 'add':
-            button = ttk.Button(toolbar, text='选择 Excel', command=self.choose_excel)
-            button.pack(side='left')
-            self.edit_widgets.append(button)
-        self.notebook = ttk.Notebook(settings_frame)
-        self.notebook.pack(fill='both', expand=True)
-        try:
-            config = load_config(mode)
-            config_error = ''
-        except Exception as error:
-            config = defaults(mode)
-            config_error = f'配置读取失败，已显示默认值：{error}'
-        for group in dict.fromkeys(field.group for field in fields(mode)):
-            page = ttk.Frame(self.notebook)
-            self.notebook.add(page, text=group)
-            canvas = tk.Canvas(page, highlightthickness=0, background='#f1f5f9')
-            scrollbar = ttk.Scrollbar(page, orient='vertical', command=canvas.yview)
-            canvas.configure(yscrollcommand=scrollbar.set)
-            scrollbar.pack(side='right', fill='y')
-            canvas.pack(side='left', fill='both', expand=True)
-            inside = ttk.Frame(canvas, padding=(16, 12))
-            window_id = canvas.create_window((0, 0), window=inside, anchor='nw')
-            inside.columnconfigure(1, weight=1)
-            inside.bind('<Configure>', lambda event, c=canvas: c.configure(scrollregion=c.bbox('all')))
-            canvas.bind('<Configure>', lambda event, c=canvas, w=window_id: c.itemconfigure(w, width=event.width))
-            canvas.bind('<Enter>', lambda event, c=canvas: c.bind_all('<MouseWheel>', lambda e: c.yview_scroll(int(-e.delta / 120), 'units')))
-            canvas.bind('<Leave>', lambda event, c=canvas: c.unbind_all('<MouseWheel>'))
-            row = 0
-            for field in (f for f in fields(mode) if f.group == group):
-                ttk.Label(inside, text=field.label).grid(row=row, column=0, sticky='nw', padx=(0, 18), pady=8)
-                if field.kind in ('lines', 'multiline'):
-                    height = min(max(len(config[field.key]), 2), 4) if field.kind == 'lines' else 3
-                    content = '\n'.join(config[field.key]) if field.kind == 'lines' else config[field.key]
-                    widget = tk.Text(inside, height=height, font=('Microsoft YaHei UI', 10), wrap='word', relief='solid', borderwidth=1)
-                    widget.insert('1.0', content)
-                    self.inputs[field.key] = widget
-                elif field.kind == 'bool':
-                    variable = tk.BooleanVar(value=config[field.key])
-                    widget = ttk.Checkbutton(inside, text='启用', variable=variable)
-                    self.inputs[field.key] = variable
-                else:
-                    variable = tk.StringVar(value=str(config[field.key]))
-                    widget = ttk.Entry(inside, textvariable=variable)
-                    self.inputs[field.key] = variable
-                widget.grid(row=row, column=1, sticky='ew', pady=5)
-                self.edit_widgets.append(widget)
-                if field.kind in ('save_xlsx', 'open_numbers', 'exe'):
-                    button = ttk.Button(inside, text='浏览…', command=lambda f=field: self.browse(f))
-                    button.grid(row=row, column=2, padx=(8, 0))
-                    self.edit_widgets.append(button)
-                row += 1
-                if field.hint:
-                    ttk.Label(inside, text=field.hint, style='Hint.TLabel', wraplength=620).grid(row=row, column=1, columnspan=2, sticky='w', pady=(0, 5))
-                    row += 1
-        log_frame = ttk.Frame(body)
-        body.add(log_frame, weight=2)
-        log_bar = ttk.Frame(log_frame)
-        log_bar.pack(fill='x', pady=(8, 4))
-        ttk.Label(log_bar, text='运行日志', font=('Microsoft YaHei UI', 11, 'bold')).pack(side='left')
-        ttk.Button(log_bar, text='打开日志目录', command=self.open_logs).pack(side='right')
-        ttk.Button(log_bar, text='清空显示', command=self.clear_log).pack(side='right', padx=6)
-        self.log = ScrolledText(log_frame, height=11, font=('Consolas', 10), background='#101c31', foreground='#dbeafe', insertbackground='white', relief='flat', state='disabled', wrap='word')
-        self.log.pack(fill='both', expand=True)
-        self.append_log('参数会自动保存；运行期间锁定配置。停止任务后可以再次开始。\n')
-        if mode == 'add':
-            self.append_log('“自动发送”开启会实际发送好友申请。“已处理”只表示已尝试，不代表添加成功。\n')
-        if config_error:
-            self.append_log(config_error + '\n')
+        from desktop_ui import build_interface
+        build_interface(self)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.bind('<Escape>', lambda event: self.stop())
         root.after(120, self.poll)
@@ -355,6 +243,8 @@ class App:
         else:
             self.running_notice.pack_forget()
             self.progress.stop()
+            for widget in self.readonly_widgets:
+                widget.configure(state='readonly')
 
     def start(self):
         from tkinter import messagebox

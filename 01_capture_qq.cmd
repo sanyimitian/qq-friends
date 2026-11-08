@@ -8,7 +8,7 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-".venv\Scripts\python.exe" "zq_qq.py"
+".venv\Scripts\python.exe" "capture_app.py"
 set "run_result=%errorlevel%"
 pause
 exit /b %run_result%

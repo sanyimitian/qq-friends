@@ -1,4 +1,5 @@
 altgraph==0.17.5
+ttkbootstrap==2.2.7
 colorama==0.4.6
 comtypes==1.4.17
 defusedxml==0.7.1

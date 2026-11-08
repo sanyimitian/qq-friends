@@ -16,7 +16,7 @@ from openpyxl.styles import Font, PatternFill
 import gui_config
 import desktop_app
 import open_qq_add_friend as adding
-import zq_qq as capture
+import zq_qq_001 as capture
 
 
 class ExcelInputTests(unittest.TestCase):
@@ -43,15 +43,15 @@ class ExcelInputTests(unittest.TestCase):
         self.addCleanup(result[1].close)
         return result
 
-    def mark(self, document, sheet, rows, path=None):
+    def mark(self, document, sheet, rows, path=None, **kwargs):
         adding.mark_rows_processed(
-            document, sheet, rows, TableRow, TableCell, P, path or self.path
+            document, sheet, rows, TableRow, TableCell, P, path or self.path,
+            **kwargs,
         )
 
-    def test_gui_default_matches_capture_excel_default(self):
+    def test_gui_default_uses_requested_desktop_workbook(self):
         add_default = gui_config.defaults('add')['NUMBER_FILE_PATH']
-        capture_default = gui_config.defaults('capture')['NUMBER_WORKBOOK_PATH']
-        self.assertEqual(Path(add_default), Path(capture_default))
+        self.assertEqual(Path(add_default), Path.home() / 'Desktop' / 'qq_member_numbers1.xlsx')
         self.assertEqual(Path(add_default).suffix, '.xlsx')
 
     def test_gui_accepts_excel_and_legacy_ods_and_sets_path_type(self):
@@ -125,9 +125,7 @@ class ExcelInputTests(unittest.TestCase):
         ])
         numbers, _, _, path = self.read_numbers()
         self.assertEqual(numbers, [
-            ('123456789', [1, 4]),
             ('234567890', [2]),
-            ('456789012', [6, 7]),
             ('00012345', [8]),
             ('567890123', [9]),
         ])
@@ -150,6 +148,57 @@ class ExcelInputTests(unittest.TestCase):
         finally:
             check.close()
 
+    def test_skips_capture_group_header_rows_and_reads_member_numbers(self):
+        self.write_rows([
+            ['群名称一', '2152042795'],
+            ['123456789'],
+            ['234567890', None, adding.PROCESSED_MARKER],
+            [],
+            ['群名称二', 127885536],
+            ['345678901'],
+        ])
+        numbers, _, _, _ = self.read_numbers()
+        self.assertEqual(numbers, [
+            ('123456789', [2]),
+            ('345678901', [6]),
+        ])
+
+    def test_no_add_button_skip_is_marked_and_reason_is_written_without_losing_note(self):
+        self.write_rows([['123456789', None, None, 'existing note']])
+        _, document, sheet, _ = self.read_numbers()
+        self.mark(
+            document, sheet, [1],
+            reason='搜索结果中没有可点击的添加按钮',
+        )
+        check = load_workbook(self.path)
+        try:
+            self.assertEqual(check.active['C1'].value, adding.PROCESSED_MARKER)
+            self.assertEqual(
+                check.active['D1'].value,
+                'existing note\n加好友跳过原因：搜索结果中没有可点击的添加按钮',
+            )
+        finally:
+            check.close()
+
+    def test_unconfigured_application_skip_gets_reason_but_remains_pending(self):
+        self.write_rows([['123456789']])
+        _, document, sheet, _ = self.read_numbers()
+        self.mark(
+            document, sheet, [1],
+            reason='申请页没有验证信息输入框，已取消且未发送',
+            mark_processed=False,
+        )
+        check = load_workbook(self.path)
+        try:
+            self.assertIsNone(check.active['C1'].value)
+            self.assertEqual(
+                check.active['D1'].value,
+                '加好友跳过原因：申请页没有验证信息输入框，已取消且未发送',
+            )
+        finally:
+            check.close()
+        self.assertEqual(self.read_numbers()[0], [('123456789', [1])])
+
     def test_invalid_qq_values_fail_with_the_source_row(self):
         invalid_values = (
             'QQ number', '1234', '1234567890123', '12345.5',
@@ -169,8 +218,8 @@ class ExcelInputTests(unittest.TestCase):
             ['123456789', 'group-1', adding.PROCESSED_MARKER],
         ])
         numbers, document, sheet, _ = self.read_numbers()
-        self.assertEqual(numbers, [('123456789', [1, 3])])
-        self.mark(document, sheet, numbers[0][1])
+        self.assertEqual(numbers, [])
+        document._qq_number_queue.sync_completed_duplicates()
         self.assertEqual(self.read_numbers()[0], [])
         reloaded = load_workbook(self.path)
         try:
@@ -249,11 +298,14 @@ class ExcelInputTests(unittest.TestCase):
         _, document, sheet, _ = self.read_numbers()
         self.mark(document, sheet, [1])
         document.close()
-        with patch.object(capture, 'NUMBER_WORKBOOK_PATH', self.path):
-            workbook, worksheet, existing = capture.open_number_workbook(Workbook, load_workbook)
+        with patch.object(capture, 'NUMBER_WORKBOOK_PATH', self.path), \
+             patch.object(capture, 'NUMBER_JOURNAL_PATH', self.directory / 'numbers.jsonl'):
+            workbook, worksheet, existing, _, _ = capture.open_number_workbook(Workbook, load_workbook)
             try:
-                self.assertFalse(capture.append_number(workbook, worksheet, existing, '123456789'))
-                self.assertTrue(capture.append_number(workbook, worksheet, existing, '234567890'))
+                section = {'group_number': '987654321', 'next_member_row': 2}
+                self.assertFalse(capture.append_number(workbook, worksheet, existing, '123456789', section))
+                self.assertTrue(capture.append_number(workbook, worksheet, existing, '234567890', section))
+                capture.atomic_save(workbook, self.path)
             finally:
                 workbook.close()
         numbers, _, active, _ = self.read_numbers()

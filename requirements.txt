@@ -4,3 +4,4 @@ pyautogui
 openpyxl
 odfpy
 rapidocr-onnxruntime
+ttkbootstrap==2.2.7

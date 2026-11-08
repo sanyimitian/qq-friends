@@ -23,14 +23,11 @@ JOURNAL_FSYNC_BATCH_SIZE = 30  # 追加日志累计多少条后执行一次磁�
 MEMBER_PAGE_SIZE = 14  # 每次翻页目标推进的成员行数。
 MEMBER_TRIGGER_POSITION = 13  # 兼容旧配置；自动分页已不依赖此门槛。
 MAX_MEMBER_PAGE_TURNS = 30  # 每个群聊最多向下翻页次数，可按需调整。
-MAX_SCROLLS = 500  # 限制会话列表最大滚动次数。
+MAX_SCROLLS = 500  # 限制加入群聊列表最大滚动次数。
 SESSION_SCROLL_STEP_RATIO = 0.60  # 使用 QQ 滚动接口时每次推进的可视区域比例，保留页面重叠。
 SESSION_SCROLL_WHEEL_NOTCHES = 6  # 不支持滚动接口时的滚轮步数，避免一次跳过多个群聊。
-MAX_CHATS = 15  # 最多自动检查前三个不同的非排除聊天窗口。
-MAX_GROUPS = 15  # 最多打开并处理两个实际群聊的成员列表。
 MAX_MEMBERS_PER_GROUP = 2
-SESSION_RETRY_LIMIT = 3  # 会话列表重排导致临时定位失败时的最大重试次数，可自行修改。
-NO_PROGRESS_LIMIT = 3  # 限制连续无新会话时的结束阈值。
+SESSION_RETRY_LIMIT = 3  # 群列表重排导致临时定位失败时的最大重试次数，可自行修改。
 GROUP_HEADER_PATTERN = re.compile(r"\(\s*\d+\s*\)\s*$")  # 匹配群标题末尾的成员数量。
 MEMBER_COUNT_PATTERN = re.compile(r"群聊成员\s*(\d+)")  # 读取成员面板显示的总人数。
 GROUP_MEMBER_LABEL_PATTERN = re.compile(r"^\(?\s*\d+\s*人\s*\)?$")
@@ -1106,6 +1103,267 @@ def get_session_list(main_window):  # 查找会话列表控件。
     )
 
 
+def get_contact_group_list(main_window):
+    return next(
+        (control for control in main_window.descendants()
+         if control.element_info.control_type == "Pane"
+         and control.window_text().strip() == "联系人列表"
+         and control.rectangle().width() > 0
+         and control.rectangle().height() > 0),
+        None,
+    )
+
+
+def get_joined_groups_category(main_window):
+    matches = [
+        control for control in main_window.descendants()
+        if control.element_info.control_type == "Button"
+        and control.window_text().strip().startswith("我加入的群聊")
+        and control.is_visible()
+        and control.rectangle().width() > 0
+        and control.rectangle().height() > 0
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def collect_joined_group_rows(main_window, work_area):
+    """Collect visible group rows under Contacts > Groups > Joined groups."""
+    pane = get_contact_group_list(main_window)
+    category = get_joined_groups_category(main_window)
+    if pane is None or category is None:
+        return []
+    pane_rect = pane.rectangle()
+    excluded_prefixes = (
+        "置顶群聊", "未命名的群聊", "我创建的群聊", "我管理的群聊", "我加入的群聊",
+    )
+    rows = []
+    positions = set()
+    for control in pane.descendants():
+        try:
+            if control.element_info.control_type != "Button" or not control.is_visible():
+                continue
+            name = control.window_text().strip()
+            if not name or name.startswith(excluded_prefixes):
+                continue
+            rect = control.rectangle()
+            center_x = (rect.left + rect.right) // 2
+            center_y = (rect.top + rect.bottom) // 2
+            if (rect.width() <= 0 or rect.height() <= 0
+                    or rect.left < pane_rect.left or rect.right > pane_rect.right + 2
+                    or not point_in_work_area(center_x, center_y, work_area)):
+                continue
+            position = (rect.top, rect.bottom)
+            if position in positions:
+                continue
+            positions.add(position)
+            rows.append((name, control))
+        except Exception:
+            continue
+    return sorted(rows, key=lambda entry: entry[1].rectangle().top)
+
+
+def ensure_joined_groups_page(desktop, work_area):
+    """Navigate to Contacts > Groups and expand the joined-groups category."""
+    main_window = find_main_qq_window(desktop)
+    if main_window is None:
+        raise RuntimeError("无法定位已确认的 QQ 主窗口")
+    if get_contact_group_list(main_window) is None:
+        contacts = [
+            control for control in main_window.descendants()
+            if control.element_info.control_type == "Button"
+            and control.window_text().strip() == "联系人"
+            and control.is_visible()
+        ]
+        if len(contacts) != 1 or not click_control_in_work_area(contacts[0], work_area):
+            raise RuntimeError("无法唯一定位联系人入口")
+        deadline = time.monotonic() + max(3.0, WAIT_SECONDS * 3)
+        while time.monotonic() < deadline:
+            main_window = find_main_qq_window(desktop)
+            if main_window and get_contact_group_list(main_window):
+                break
+            time.sleep(0.15)
+
+    group_tabs = [
+        control for control in main_window.descendants()
+        if control.element_info.control_type == "TabItem"
+        and control.window_text().strip() == "群聊"
+        and control.is_visible()
+    ]
+    if len(group_tabs) != 1:
+        raise RuntimeError("联系人页中无法唯一定位“群聊”标签")
+    try:
+        selected = group_tabs[0].is_selected()
+    except Exception:
+        selected = None
+    if selected is not True:
+        group_tabs[0].click_input()
+        time.sleep(min(0.5, WAIT_SECONDS))
+
+    main_window = find_main_qq_window(desktop)
+    category = get_joined_groups_category(main_window) if main_window else None
+    if category is None:
+        raise RuntimeError("群聊页中无法定位“我加入的群聊”分类")
+    if not collect_joined_group_rows(main_window, work_area):
+        if not click_control_in_work_area(category, work_area):
+            raise RuntimeError("“我加入的群聊”分类不在可操作区域")
+        deadline = time.monotonic() + max(3.0, WAIT_SECONDS * 3)
+        while time.monotonic() < deadline:
+            main_window = find_main_qq_window(desktop)
+            if main_window and collect_joined_group_rows(main_window, work_area):
+                break
+            time.sleep(0.15)
+    if main_window is None or get_contact_group_list(main_window) is None:
+        raise RuntimeError("未能打开联系人群聊列表")
+    return main_window
+
+
+def scroll_joined_group_list(desktop, main_window, pyautogui, work_area):
+    last_error = ""
+    prefer_wheel = False
+    for attempt in range(3):
+        main_window = find_main_qq_window(desktop)
+        pane = get_contact_group_list(main_window) if main_window else None
+        rows = collect_joined_group_rows(main_window, work_area) if main_window else []
+        if pane is None or not rows:
+            return False, "我加入的群聊列表没有可滚动的可见群行"
+        rect = pane.rectangle()
+        left, top = max(rect.left, work_area[0]), max(rect.top, work_area[1])
+        right, bottom = min(rect.right, work_area[2]), min(rect.bottom, work_area[3])
+        if right - left < 12 or bottom - top < 12:
+            return False, "我加入的群聊列表不在可操作屏幕区域"
+        baseline = tuple(
+            (name, row.rectangle().top, row.rectangle().bottom)
+            for name, row in rows
+        )
+        method = ""
+        if not prefer_wheel:
+            try:
+                scroll = pane.iface_scroll
+                if not scroll.CurrentVerticallyScrollable:
+                    return False, "我加入的群聊列表已到末尾"
+                percent = float(scroll.CurrentVerticalScrollPercent)
+                view_size = float(scroll.CurrentVerticalViewSize)
+                if percent >= 99.99:
+                    return False, "我加入的群聊列表已到末尾"
+                if not (0 <= percent < 100 and 0 < view_size < 100):
+                    raise ValueError("无效的滚动范围")
+                scrollable_pixels = rect.height() * (100 / view_size - 1)
+                if scrollable_pixels <= 0:
+                    return False, "我加入的群聊列表没有可滚动内容"
+                step = min((bottom - top) * 0.65, scrollable_pixels)
+                target = min(100.0, percent + step / scrollable_pixels * 100)
+                if target <= percent:
+                    return False, "我加入的群聊列表已到末尾"
+                scroll.SetScrollPercent(-1.0, target)
+                method = "群聊列表滚动接口"
+            except Exception as error:
+                last_error = type(error).__name__
+                prefer_wheel = True
+        if not method:
+            row_index = min(len(rows) - 1, ((attempt + 1) * len(rows)) // 4)
+            row_rect = rows[row_index][1].rectangle()
+            x = max(left, min(right - 1, (row_rect.left + row_rect.right) // 2))
+            y = max(top, min(bottom - 1, (row_rect.top + row_rect.bottom) // 2))
+            try:
+                pyautogui.moveTo(x, y)
+                pyautogui.scroll(-1, x=x, y=y)
+                method = "群行内滚轮"
+            except Exception as error:
+                return False, f"我加入的群聊列表滚动失败：{error}"
+
+        deadline = time.monotonic() + max(1.0, WAIT_SECONDS)
+        time.sleep(0.15)
+        while time.monotonic() < deadline:
+            current_window = find_main_qq_window(desktop)
+            current_rows = collect_joined_group_rows(current_window, work_area) if current_window else []
+            signature = tuple(
+                (name, row.rectangle().top, row.rectangle().bottom)
+                for name, row in current_rows
+            )
+            if signature and signature != baseline:
+                return True, f"{method}已推进，可见群行已变化"
+            time.sleep(0.15)
+        prefer_wheel = True
+        print(f"群聊列表暂未变化，滚动尝试 {attempt + 1}/3。")
+
+    detail = f"（列表接口提示：{last_error}）" if last_error else ""
+    return False, f"连续 3 次滚动后可见群行未变化，可能已到末尾或滚动未生效{detail}"
+
+
+def enter_group_chat_from_profile(main_window, desktop, group_name, work_area):
+    send_buttons = [
+        control for control in main_window.descendants()
+        if control.element_info.control_type == "Button"
+        and control.window_text().strip() in {"发消息", "发送消息", "发送群聊消息"}
+        and control.is_visible()
+    ]
+    if len(send_buttons) != 1 or not click_control_in_work_area(send_buttons[0], work_area):
+        raise RuntimeError(f"群“{group_name}”资料页中无法唯一定位发消息按钮")
+    return wait_for_group_header(desktop, group_name)
+
+
+def open_group_profile_from_joined_list(desktop, group_name, pyautogui, work_area):
+    main_window = ensure_joined_groups_page(desktop, work_area)
+    pane = get_contact_group_list(main_window)
+    try:
+        scroll = pane.iface_scroll
+        if scroll.CurrentVerticallyScrollable:
+            scroll.SetScrollPercent(-1.0, 0.0)
+            time.sleep(min(0.5, WAIT_SECONDS))
+    except Exception:
+        pass
+
+    for _ in range(min(MAX_SCROLLS, 100)):
+        main_window = find_main_qq_window(desktop)
+        rows = collect_joined_group_rows(main_window, work_area) if main_window else []
+        matches = [row for name, row in rows if name == group_name]
+        if len(matches) == 1:
+            if not click_control_in_work_area(matches[0], work_area):
+                raise RuntimeError(f"群聊“{group_name}”不在可操作区域")
+            deadline = time.monotonic() + max(5.0, WAIT_SECONDS * 5)
+            while time.monotonic() < deadline:
+                main_window = find_main_qq_window(desktop)
+                details = find_group_profile_details(main_window, group_name) if main_window else None
+                if details is not None:
+                    print(f"已在群资料页核对群名和群号：{group_name}（{details[0]}）。")
+                    return main_window, details[0]
+                time.sleep(0.2)
+            raise RuntimeError(f"点击群聊“{group_name}”后，资料页未显示可确认的名称和群号")
+        if len(matches) > 1:
+            raise RuntimeError(f"“我加入的群聊”列表中出现多个同名群“{group_name}”，已停止以免选错")
+
+        scrolled, reason = scroll_joined_group_list(
+            desktop, main_window, pyautogui, work_area
+        )
+        if not scrolled:
+            raise RuntimeError(f"未能在“我加入的群聊”列表中定位“{group_name}”：{reason}")
+        time.sleep(min(0.5, WAIT_SECONDS))
+    raise RuntimeError(f"搜索“我加入的群聊”列表达到滚动上限，未找到“{group_name}”")
+
+
+def ensure_message_session_list(desktop, work_area):
+    main_window = find_main_qq_window(desktop)
+    if main_window is None:
+        raise RuntimeError("无法定位已确认的 QQ 主窗口")
+    if get_session_list(main_window) is not None:
+        return main_window
+    messages = [
+        control for control in main_window.descendants()
+        if control.element_info.control_type == "Button"
+        and control.window_text().strip() == "消息"
+        and control.is_visible()
+    ]
+    if len(messages) != 1 or not click_control_in_work_area(messages[0], work_area):
+        raise RuntimeError("无法唯一定位左侧“消息”入口")
+    deadline = time.monotonic() + max(3.0, WAIT_SECONDS * 3)
+    while time.monotonic() < deadline:
+        main_window = find_main_qq_window(desktop)
+        if main_window and get_session_list(main_window) is not None:
+            return main_window
+        time.sleep(0.15)
+    raise RuntimeError("点击“消息”后仍无法定位会话列表")
+
+
 def get_group_header_button(main_window, group_name):  # 查找指定群聊标题按钮。
     """通过群名和成员人数特征寻找群聊标题按钮，不访问成员列表内容。"""
     buttons = main_window.descendants(control_type="Button")
@@ -1143,6 +1401,10 @@ def get_group_header_button(main_window, group_name):  # 查找指定群聊标�
 
 def find_group_number_in_profile(main_window, group_name):
     """从群资料页的名称、纯数字群号和成员数同一行关系中取群号。"""
+    page_details = find_group_profile_details(main_window, group_name)
+    if page_details is not None:
+        return page_details[0]
+
     candidates = set()
     for document in main_window.descendants():
         try:
@@ -1192,12 +1454,106 @@ def find_group_number_in_profile(main_window, group_name):
     return next(iter(candidates), None)
 
 
-def read_group_number_from_profile(main_window, group_name):
+def find_group_profile_details(main_window, group_name):
+    """Read identity from the Contacts group profile page shown in current QQ."""
+    texts = []
+    buttons = []
+    for control in main_window.descendants():
+        try:
+            if not control.is_visible():
+                continue
+            rect = control.rectangle()
+            if rect.width() <= 0 or rect.height() <= 0:
+                continue
+            kind = control.element_info.control_type
+            if kind == "Text":
+                texts.append((control.window_text().strip(), rect))
+            elif kind == "Button" and control.window_text().strip() in {
+                "发消息", "发送消息", "发送群聊消息",
+            }:
+                buttons.append(control)
+        except Exception:
+            continue
+
+    names = [rect for text, rect in texts if text == group_name]
+    labels = [rect for text, rect in texts if text == "群号"]
+    numbers = [(text, rect) for text, rect in texts
+               if GROUP_NUMBER_VALUE_PATTERN.fullmatch(text)]
+    group_member_markers = [text for text, _ in texts
+                            if text.startswith("群成员") and re.search(r"\d+\s*人", text)]
+    candidates = set()
+    for name_rect in names:
+        for label_rect in labels:
+            name_to_label_gap = label_rect.top - name_rect.bottom
+            if (not 0 <= name_to_label_gap <= 24
+                    or abs(label_rect.left - name_rect.left) > 80):
+                continue
+            for number, number_rect in numbers:
+                overlap = min(label_rect.bottom, number_rect.bottom) - max(
+                    label_rect.top, number_rect.top
+                )
+                row_height = min(label_rect.height(), number_rect.height())
+                horizontal_gap = number_rect.left - label_rect.right
+                if (row_height > 0 and overlap >= row_height * 0.5
+                        and -4 <= horizontal_gap <= 80):
+                    candidates.add(number)
+    if not names or not group_member_markers or len(buttons) != 1:
+        return None
+    if len(candidates) > 1:
+        raise RuntimeError(f"群资料页中“{group_name}”对应多个群号，无法确认。")
+    if len(candidates) == 1:
+        return next(iter(candidates)), buttons[0]
+    return None
+
+
+def profile_card_number_snapshot(main_window, desktop):
+    """Read numeric IDs exposed by separate QQ profile-card windows."""
+    process_id = main_window.process_id()
+    cards = {}
+    for window in desktop.windows():
+        try:
+            if (window.handle == main_window.handle
+                    or window.process_id() != process_id
+                    or not window.is_visible()
+                    or window.window_text().strip() not in {"资料卡", "群资料", "群聊资料"}):
+                continue
+            numbers = {
+                control.window_text().strip()
+                for control in window.descendants()
+                if control.is_visible()
+                and control.element_info.control_type in {"Text", "Edit"}
+                and GROUP_NUMBER_VALUE_PATTERN.fullmatch(control.window_text().strip())
+                and control.rectangle().width() > 0
+                and control.rectangle().height() > 0
+            }
+            cards[window.handle] = numbers
+        except Exception:
+            continue
+    return cards
+
+
+def find_new_group_number_in_profile_card(main_window, desktop, previous_cards):
+    """Accept a unique number only from a profile card opened or changed by the title click."""
+    current_cards = profile_card_number_snapshot(main_window, desktop)
+    candidates = set()
+    for handle, numbers in current_cards.items():
+        if handle not in previous_cards or numbers != previous_cards[handle]:
+            if len(numbers) == 1:
+                candidates.update(numbers)
+    if len(candidates) > 1:
+        raise RuntimeError("群标题打开的资料卡包含多个号码，无法确认群号。")
+    return next(iter(candidates), None)
+
+
+def read_group_number_from_profile(main_window, group_name, desktop=None):
     """必要时点击群标题进入群资料页，并等待明确的群号字段出现。"""
     group_number = find_group_number_in_profile(main_window, group_name)
     if group_number is not None:
         return group_number
 
+    previous_profile_cards = (
+        profile_card_number_snapshot(main_window, desktop) if desktop is not None else {}
+    )
     header_button = get_group_header_button(main_window, group_name)
     if header_button is None:
         raise RuntimeError(f"无法定位群聊“{group_name}”的标题，不能读取群号。")
@@ -1206,15 +1562,22 @@ def read_group_number_from_profile(main_window, group_name):
         if control.element_info.control_type == "Text"
         and control.window_text().strip() == group_name
     ]
-    if len(name_controls) != 1:
-        raise RuntimeError(f"无法唯一定位群聊“{group_name}”的名称控件，不能读取群号。")
-
-    name_controls[0].click_input()
+    click_target = name_controls[0] if len(name_controls) == 1 else header_button
+    if click_target is header_button:
+        print(f"群名文本控件不唯一，改用已确认的群标题按钮打开“{group_name}”资料。")
+    click_target.click_input()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         group_number = find_group_number_in_profile(main_window, group_name)
         if group_number is not None:
             return group_number
+        if desktop is not None:
+            group_number = find_new_group_number_in_profile_card(
+                main_window, desktop, previous_profile_cards
+            )
+            if group_number is not None:
+                print(f"从群标题打开的独立资料卡读取到群号 {group_number}。")
+                return group_number
         time.sleep(0.2)
     raise RuntimeError(f"打开群“{group_name}”的资料页后，仍无法可靠识别 QQ 群号。")
 
@@ -1372,10 +1735,50 @@ def get_member_count(main_window):
     return 0
 
 
-def member_page_signature(items, panel):
-    top = panel.rectangle().top
-    return tuple((member_item_text(item), item.rectangle().top - top, item.rectangle().height())
-                 for item in items)
+def member_item_identity(item):
+    text = member_item_text(item)
+    try:
+        runtime_id = item.element_info.runtime_id
+    except Exception:
+        runtime_id = None
+    if runtime_id:
+        try:
+            runtime_id = tuple(runtime_id)
+        except TypeError:
+            runtime_id = (runtime_id,)
+    return text, runtime_id
+
+
+def member_page_overlap(previous_keys, current_keys):
+    """Count rows repeated at the end of one visible page and start of the next."""
+    limit = min(len(previous_keys), len(current_keys))
+    previous_text_counts = {}
+    current_text_counts = {}
+    for text, _ in previous_keys:
+        previous_text_counts[text] = previous_text_counts.get(text, 0) + 1
+    for text, _ in current_keys:
+        current_text_counts[text] = current_text_counts.get(text, 0) + 1
+
+    for count in range(limit, 0, -1):
+        previous_page_tail = previous_keys[-count:]
+        current_page_head = current_keys[:count]
+        text_matches = all(
+            previous[0]
+            and previous[0] == current[0]
+            and previous_text_counts[previous[0]] == 1
+            and current_text_counts[current[0]] == 1
+            for previous, current in zip(previous_page_tail, current_page_head)
+        )
+        identities_match = all(
+            previous == current for previous, current in zip(previous_page_tail, current_page_head)
+        )
+        if identities_match or (count >= 2 and text_matches):
+            return count
+    return 0
+
+
+def member_page_signature(items, panel=None):
+    return tuple(member_item_text(item) for item in items)
 
 
 def scroll_member_list(desktop, pyautogui, work_area):
@@ -1425,12 +1828,20 @@ def scroll_member_list(desktop, pyautogui, work_area):
                 last_error = type(error).__name__
                 prefer_wheel = True
         if method is None:
-            # A single notch keeps overlap; never wheel over the chat/session list.
-            x = int(right - min(12, (right - left) / 4))
-            y = int((top + bottom) / 2)
+            # Wheel over a visible member row; gaps and panel padding may ignore it.
+            wheel_items = collect_member_items(member_list, panel, work_area)
+            if not wheel_items:
+                return False, "成员列表没有可滚动的可见成员行"
+            row_index = min(
+                len(wheel_items) - 1,
+                ((attempt + 1) * len(wheel_items)) // 4,
+            )
+            row_rect = wheel_items[row_index].rectangle()
+            x = max(left, min(right - 1, (row_rect.left + row_rect.right) // 2))
+            y = max(top, min(bottom - 1, (row_rect.top + row_rect.bottom) // 2))
             pyautogui.moveTo(x, y)
             pyautogui.scroll(-1, x=x, y=y)
-            method = "成员列表内滚轮"
+            method = "成员行内滚轮"
         deadline = time.monotonic() + max(1.0, WAIT_SECONDS)
         time.sleep(0.15)
         while True:
@@ -1475,6 +1886,7 @@ def click_non_admin_members(
     saved_number_count = 0
     duplicate_number_count = 0
     number_error_count = 0
+    previous_page_keys = ()
     while True:
         main_window = find_main_qq_window(desktop)
         member_window = get_member_list_window(main_window) if main_window else None
@@ -1495,6 +1907,13 @@ def click_non_admin_members(
                 duplicate_number_count,
                 number_error_count,
             )
+
+        page_keys = [member_item_identity(item) for _, item in page_items]
+        overlap = member_page_overlap(previous_page_keys, page_keys)
+        if overlap:
+            print(f"跳过与上一屏重叠的成员行：{overlap} 名。")
+        previous_page_keys = page_keys
+        page_items = page_items[overlap:]
 
         for role_and_name, item in page_items:
             if not role_and_name:
@@ -1708,19 +2127,35 @@ def main():  # 执行 QQ 群聊面板查看主流程。
         print(f"无法确定 Windows 工作区边界，为避开任务栏已停止：{error}")
         return
 
-    session_list = get_session_list(main_window)
-    if session_list is None:
-        print("QQ 没有暴露可访问的会话列表控件；请确认使用桌面版并重试。")
+    try:
+        main_window = ensure_joined_groups_page(desktop, work_area)
+    except Exception as error:
+        print(f"无法打开“我加入的群聊”列表：{error}")
         return
+    group_pane = get_contact_group_list(main_window)
+    try:
+        group_scroll = group_pane.iface_scroll
+        if group_scroll.CurrentVerticallyScrollable:
+            group_scroll.SetScrollPercent(-1.0, 0.0)
+            time.sleep(min(0.5, WAIT_SECONDS))
+    except Exception as error:
+        rows = collect_joined_group_rows(main_window, work_area)
+        if rows:
+            first_rect = rows[0][1].rectangle()
+            x = (first_rect.left + first_rect.right) // 2
+            y = (first_rect.top + first_rect.bottom) // 2
+            pyautogui.moveTo(x, y)
+            pyautogui.scroll(100, x=x, y=y)
+            time.sleep(min(0.5, WAIT_SECONDS))
+        else:
+            print(f"无法确认群聊列表位于顶部：{type(error).__name__}。")
 
-    # 会话扫描代码块：只使用会话行的首个文本控件作为名称；通过滚动会话面板
-    # 加载更多条目。滚动位置由会话列表窗口矩形计算，不访问群成员列表。
+    # Process visible joined groups from top to bottom, then advance the group list.
     seen_names = set()
-    counted_names = set()
     pending_retry_names = set()
     session_retry_counts = {}
     session_retry_limit = max(0, SESSION_RETRY_LIMIT)
-    checked_chat_count = 0
+    checked_group_count = 0
     excluded_chat_count = 0
     non_group_count = 0
     opened_count = 0
@@ -1733,72 +2168,83 @@ def main():  # 执行 QQ 群聊面板查看主流程。
     member_number_error_count = 0
     existing_group_skipped_count = 0
     scroll_count = 0
-    no_progress = 0
 
-    while (
-        (checked_chat_count < MAX_CHATS or pending_retry_names)
-        and opened_count < MAX_GROUPS
-        and scroll_count <= MAX_SCROLLS
-        and no_progress < NO_PROGRESS_LIMIT
-    ):
+    list_complete = False
+    while scroll_count <= MAX_SCROLLS:
         main_window = find_main_qq_window(desktop)
-        session_list = get_session_list(main_window) if main_window else None
-        if session_list is None:
+        if main_window is None or get_contact_group_list(main_window) is None:
             failed_count += 1
-            print("无法重新定位 QQ 会话列表，结束扫描。")
+            print("无法重新定位“我加入的群聊”列表，结束扫描。")
             break
 
         new_rows = [
             (name, row)
-            for name, row in collect_session_rows(session_list)
-            if name not in seen_names
+            for name, row in collect_joined_group_rows(main_window, work_area)
+            if name not in seen_names or name in pending_retry_names
         ]
         if not new_rows:
-            no_progress += 1
-        else:
-            no_progress = 0
+            scrolled, scroll_reason = scroll_joined_group_list(
+                desktop, main_window, pyautogui, work_area
+            )
+            if not scrolled:
+                if "已到末尾" in scroll_reason or "没有可滚动内容" in scroll_reason:
+                    list_complete = True
+                    print(f"我加入的群聊列表已处理到底部：{scroll_reason}。")
+                else:
+                    failed_count += 1
+                    print(f"群聊列表无法继续推进，扫描停止：{scroll_reason}。")
+                break
+            print(f"群聊列表推进：{scroll_reason}。")
+            time.sleep(WAIT_SECONDS)
+            scroll_count += 1
+            continue
 
         for name, _row in new_rows:
-            if opened_count >= MAX_GROUPS:
-                break
-            if checked_chat_count >= MAX_CHATS and name not in pending_retry_names:
-                continue
-            if name in EXCLUDED_CHAT_NAMES:
-                excluded_chat_count += 1
-                print(f"按完整名称跳过指定群聊：{name}")
-                seen_names.add(name)
-                continue
-
-            if name not in counted_names:
-                counted_names.add(name)
-                checked_chat_count += 1
-            print(f"进度：正在检查第 {checked_chat_count}/{MAX_CHATS} 个非排除聊天：{name}")
+            if name not in pending_retry_names:
+                checked_group_count += 1
+            print(f"进度：按列表顺序检查第 {checked_group_count} 个群聊：{name}")
             try:
-                main_window, header_button = ensure_group_chat_open(desktop, name, work_area)
+                main_window, group_number = open_group_profile_from_joined_list(
+                    desktop, name, pyautogui, work_area
+                )
             except Exception as error:
                 retry_count = session_retry_counts.get(name, 0) + 1
                 session_retry_counts[name] = retry_count
                 if retry_count <= session_retry_limit:
                     pending_retry_names.add(name)
                     print(
-                        f"会话“{name}”可能因新消息导致列表重排，暂时无法重新定位；"
+                        f"群聊“{name}”在我加入的群聊列表中暂时无法定位；"
                         f"将在下一轮重新查找（第 {retry_count}/{session_retry_limit} 次重试）。"
                     )
+                    try:
+                        ensure_joined_groups_page(desktop, work_area)
+                    except Exception as restore_error:
+                        print(f"返回群聊列表失败：{restore_error}")
                     continue
                 pending_retry_names.discard(name)
                 seen_names.add(name)
                 failed_count += 1
                 print(
-                    f"会话“{name}”在初次尝试及 {session_retry_limit} 次重试后仍无法重新定位，"
+                    f"群聊“{name}”在我加入的群聊列表中初次查找及 {session_retry_limit} 次重试后仍未定位，"
                     f"已停止重试并记录失败：{error}"
                 )
+                try:
+                    ensure_joined_groups_page(desktop, work_area)
+                except Exception as restore_error:
+                    print(f"返回群聊列表失败：{restore_error}")
                 continue
 
             try:
-                if header_button is None:
-                    non_group_count += 1
-                    print(f"未能识别“{name}”的群聊标题：可能是私聊、聊天未打开或 QQ 界面不兼容；未进入成员采集。")
+                if group_number in existing_group_numbers:
+                    existing_group_skipped_count += 1
+                    print(f"群号 {group_number} 已存在于工作簿，跳过群“{name}”的成员处理。")
                     continue
+
+                main_window, header_button = enter_group_chat_from_profile(
+                    main_window, desktop, name, work_area
+                )
+                if header_button is None:
+                    raise RuntimeError(f"点击群资料页的发消息按钮后，未能确认进入群聊“{name}”")
 
                 # Some QQ layouts already show the member list in the right sidebar.
                 if not member_panel_is_open(main_window):
@@ -1812,45 +2258,19 @@ def main():  # 执行 QQ 群聊面板查看主流程。
                     print(f"使用“{name}”右侧已显示的群成员列表。")
                 if not main_window or not member_panel_is_open(main_window):
                     failed_count += 1
-                    print(f"无法确认“{name}”的成员列表已打开，结束扫描。")
-                    print_summary(
-                        opened_count,
-                        non_group_count,
-                        failed_count,
-                        excluded_chat_count,
-                        checked_chat_count,
-                    )
-                    return
+                    print(f"无法确认“{name}”的成员列表已打开，跳过该群并继续列表顺序。")
+                    continue
 
-                print(f"已确认群成员面板：{name}")
-                try:
-                    group_number = read_group_number_from_profile(main_window, name)
-                    if group_number in existing_group_numbers:
-                        existing_group_skipped_count += 1
-                        print(
-                            f"群号 {group_number} 已存在于工作簿，跳过群“{name}”的成员处理，继续检查下一个聊天。"
-                        )
-                        continue
-                    group_section = append_group_info(
-                        number_workbook,
-                        number_worksheet,
-                        name,
-                        group_number,
-                    )
-                    existing_group_numbers.add(group_number)
-                    opened_count += 1
-                    print(f"已保存群信息：{name}（群号 {group_number}）")
-                except Exception as error:
-                    failed_count += 1
-                    print(f"群聊“{name}”的群号无法确认或保存，脚本停止：{error}")
-                    print_summary(
-                        opened_count,
-                        non_group_count,
-                        failed_count,
-                        excluded_chat_count,
-                        checked_chat_count,
-                    )
-                    return
+                print(f"已按资料页核对并进入群聊：{name}（群号 {group_number}）")
+                group_section = append_group_info(
+                    number_workbook,
+                    number_worksheet,
+                    name,
+                    group_number,
+                )
+                existing_group_numbers.add(group_number)
+                opened_count += 1
+                print(f"已保存群信息：{name}（群号 {group_number}）")
                 try:
                     (
                         clicked_count,
@@ -1901,51 +2321,27 @@ def main():  # 执行 QQ 群聊面板查看主流程。
                     print("当前群聊成员处理已结束，继续检查下一个聊天。")
             except Exception as error:
                 failed_count += 1
-                print(f"处理会话“{name}”失败，自动检查下一个聊天：{error}")
+                print(f"处理群聊“{name}”失败，继续列表中的下一个群：{error}")
             finally:
-                # 只有本轮已经得到明确结果后才标记为已处理；定位失败的候选会留给下一轮重试。
                 seen_names.add(name)
                 pending_retry_names.discard(name)
                 session_retry_counts.pop(name, None)
+                try:
+                    ensure_joined_groups_page(desktop, work_area)
+                except Exception as restore_error:
+                    failed_count += 1
+                    print(f"处理完群“{name}”后未能返回“我加入的群聊”列表：{restore_error}")
 
-        if (
-            opened_count >= MAX_GROUPS
-            or (checked_chat_count >= MAX_CHATS and not pending_retry_names)
-        ):
-            break
-
-        # 每轮重新获取会话列表，避免群消息到达后继续使用旧的滚动对象。
-        main_window = find_main_qq_window(desktop)
-        session_list = get_session_list(main_window) if main_window else None
-        if session_list is None:
-            failed_count += 1
-            print("滚动前无法重新定位 QQ 会话列表，结束扫描。")
-            break
-        scrolled, scroll_reason = scroll_session_list(session_list, pyautogui, work_area)
-        if not scrolled:
-            if "到达底部" in scroll_reason or "没有可滚动内容" in scroll_reason:
-                print(f"会话列表扫描结束：{scroll_reason}。")
-                break
-            failed_count += 1
-            print(f"会话列表滚动失败，已停止扫描：{scroll_reason}。")
-            break
-        print(f"会话列表推进：{scroll_reason}。")
-        time.sleep(WAIT_SECONDS)
-        scroll_count += 1
-
-    if checked_chat_count >= MAX_CHATS and not pending_retry_names:
-        print(f"结束原因：已达到最多检查会话数 {MAX_CHATS}（包含私聊及未识别会话）。")
-    elif opened_count >= MAX_GROUPS:
-        print(f"结束原因：已达到最多处理群数 {MAX_GROUPS}。")
-    elif pending_retry_names:
+    if pending_retry_names:
         pending = "、".join(sorted(pending_retry_names))
-        print(f"仍有会话未能重新定位，未标记为已处理，下次运行可继续尝试：{pending}")
-    elif no_progress >= NO_PROGRESS_LIMIT:
-        print("结束原因：连续滚动未发现新会话。")
+        print(f"仍有群聊未能定位：{pending}")
+    elif list_complete:
+        print(f"结束原因：已按顺序处理“我加入的群聊”列表中的 {checked_group_count} 个群聊。")
     elif scroll_count > MAX_SCROLLS:
-        print(f"结束原因：已达到会话滚动次数上限 {MAX_SCROLLS}。")
+        failed_count += 1
+        print(f"结束原因：已达到群聊列表滚动次数上限 {MAX_SCROLLS}，列表可能未处理完整。")
     if opened_count == 0:
-        print("本次未打开任何群成员列表，因此未采集号码；请确认目标聊天可正常打开，并查看前面的群标题识别提示。")
+        print("本次未打开任何群成员列表，因此未采集号码；请检查群列表与资料页识别提示。")
     try:
         sync_journal()
         if reconcile_journal(
@@ -1963,7 +2359,7 @@ def main():  # 执行 QQ 群聊面板查看主流程。
         non_group_count,
         failed_count,
         excluded_chat_count,
-        checked_chat_count,
+        checked_group_count,
     )
     print(f"因群号已记录而跳过的群数：{existing_group_skipped_count}")
     print(f"点击普通成员总数：{member_clicked_count}")
@@ -1985,10 +2381,10 @@ def print_summary(
 ):  # 输出处理统计汇总。
     """输出脚本处理情况。"""
     print("\n处理汇总")
-    print(f"成功打开成员列表的群聊：{opened_count}/{MAX_GROUPS}")
-    print(f"未识别到群聊标题的会话：{skipped_count}（不代表全部是私聊）")
+    print(f"成功打开成员列表的群聊：{opened_count}")
+    print(f"未能打开成员列表或识别群资料的群聊：{skipped_count}")
     print(f"跳过的指定群聊：{excluded_count}")
-    print(f"已检查的非排除聊天：{checked_count}/{MAX_CHATS}")
+    print(f"按列表顺序检查的群聊：{checked_count}")
     print(f"自动处理失败数：{failed_count}")
     print("成员名称和角色仅用于识别及跳过成员；工作簿按群保存群名称、群号和全局去重的成员号码。")
 

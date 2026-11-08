@@ -450,20 +450,22 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(send.invoke_attempts, 1)
 
     def test_send_invoke_exception_is_not_retried_by_click_input(self):
+        from test_add_sequence import VirtualClock
         window, _, _, _, send = application()
         self.prepare(Desktop(window))
         send.invoke_error = RuntimeError('invoke failed')
-        with self.assertRaises(RuntimeError):
+        with patch.object(verification, 'time', VirtualClock()), self.assertRaises(RuntimeError):
             verification.click_verified_send(window, 123, MESSAGE, expected_number='851984709')
         self.assertEqual(send.invoke_attempts, 1)
         self.assertEqual(send.clicks, 0)
 
     def test_send_visibility_read_error_is_not_success(self):
+        from test_add_sequence import VirtualClock
         window, _, _, _, send = application()
         self.prepare(Desktop(window))
         send.invoke_close_after = 100
         send.on_invoke = lambda target: setattr(target, 'visible_error', RuntimeError('transient UIA failure'))
-        with self.assertRaisesRegex(RuntimeError, '无法确认申请窗口是否关闭'):
+        with patch.object(verification, 'time', VirtualClock()), self.assertRaisesRegex(RuntimeError, '无法确认申请窗口是否关闭'):
             verification.click_verified_send(window, 123, MESSAGE, timeout=1)
         self.assertEqual(send.invoke_attempts, 1)
 

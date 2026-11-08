@@ -5,7 +5,7 @@ import io
 import unittest
 from unittest.mock import Mock, patch
 
-import zq_qq as capture
+import zq_qq_001 as capture
 from test_capture_detection import Clock, Control, Rectangle, session_list, session_row, window
 
 
@@ -91,6 +91,39 @@ class NavigationTests(unittest.TestCase):
             self.assertEqual(capture.ensure_group_chat_open(object(), '目标群', WORK_AREA), (main, header))
         click.assert_not_called()
 
+    def test_joined_group_profile_is_checked_before_chat_entry(self):
+        row = Control('目标群', 'Button', rect=(100, 100, 350, 160))
+        main = window()
+        desktop = object()
+        clock = Clock()
+        with patch.object(capture, 'ensure_joined_groups_page', return_value=main), \
+                patch.object(capture, 'collect_joined_group_rows', return_value=[('目标群', row)]), \
+                patch.object(capture, 'find_main_qq_window', return_value=main), \
+                patch.object(capture, 'find_group_profile_details', return_value=('123456789', object())), \
+                patch.object(capture, 'click_control_in_work_area', return_value=True) as click, \
+                patch.object(capture, 'time', clock):
+            opened, group_number = capture.open_group_profile_from_joined_list(
+                desktop, '目标群', Mock(), WORK_AREA
+            )
+        self.assertIs(opened, main)
+        self.assertEqual(group_number, '123456789')
+        click.assert_called_once_with(row, WORK_AREA)
+
+    def test_chat_entry_uses_profile_send_message_button(self):
+        send = Control('发送群聊消息', 'Button', rect=(650, 700, 780, 740))
+        main = window(send)
+        desktop = object()
+        chat = object()
+        header = object()
+        with patch.object(capture, 'click_control_in_work_area', return_value=True) as click, \
+                patch.object(capture, 'wait_for_group_header', return_value=(chat, header)) as wait:
+            self.assertEqual(
+                capture.enter_group_chat_from_profile(main, desktop, '目标群', WORK_AREA),
+                (chat, header),
+            )
+        click.assert_called_once_with(send, WORK_AREA)
+        wait.assert_called_once_with(desktop, '目标群')
+
     def test_missing_target_fails_without_clicking_another_chat(self):
         main = window(session_list(session_row('其他群')))
         with patch.object(capture, 'find_main_qq_window', return_value=main), \
@@ -164,6 +197,60 @@ class MemberScrollingTests(unittest.TestCase):
         mouse.moveTo.assert_not_called()
         mouse.scroll.assert_not_called()
 
+    def test_page_signature_ignores_position_only_changes(self):
+        main, panel, rows = member_scene()
+        before = capture.member_page_signature(rows, panel)
+        for index, row in enumerate(rows):
+            rect = row.rectangle()
+            row._rectangle = Rectangle(
+                rect.left,
+                rect.top - 5,
+                rect.right,
+                rect.bottom - 5,
+            )
+            row.element_info.runtime_id = (1000 + index,)
+        self.assertEqual(capture.member_page_signature(rows, panel), before)
+
+    def test_runtime_id_churn_without_new_member_is_not_scroll_progress(self):
+        main, panel, rows = member_scene()
+        panel.iface_scroll = FakeScroll(failure=RuntimeError('unsupported'))
+        mouse = Mock()
+        next_id = 1000
+
+        def churn_ids(*args, **kwargs):
+            nonlocal next_id
+            for row in rows:
+                row.element_info.runtime_id = (next_id,)
+                next_id += 1
+
+        mouse.scroll.side_effect = churn_ids
+        result, _, _ = self.run_scroll(main, mouse)
+        self.assertFalse(result[0])
+        self.assertIn('未变化', result[1])
+        self.assertEqual(mouse.scroll.call_count, 3)
+
+    def test_overlap_skips_same_rows_but_keeps_distinct_same_named_members(self):
+        first = member('同名', 100)
+        second = member('同名', 140)
+        third = member('新成员', 180)
+        previous = [capture.member_item_identity(item) for item in (first, second)]
+        current = [capture.member_item_identity(item) for item in (second, third)]
+        overlap = capture.member_page_overlap(previous, current)
+        self.assertEqual(overlap, 1)
+        self.assertEqual(current[overlap:], [capture.member_item_identity(third)])
+
+    def test_overlap_matches_unique_text_when_uia_ids_change(self):
+        previous_rows = [member(name, 100 + index * 40) for index, name in enumerate(('甲', '乙', '丙'))]
+        current_rows = [member(name, 100 + index * 40) for index, name in enumerate(('乙', '丙', '丁'))]
+        previous = [capture.member_item_identity(item) for item in previous_rows]
+        current = [capture.member_item_identity(item) for item in current_rows]
+        self.assertEqual(capture.member_page_overlap(previous, current), 2)
+
+    def test_one_same_named_row_with_a_new_identity_is_not_assumed_overlap(self):
+        previous = [capture.member_item_identity(member('同名', 100))]
+        current = [capture.member_item_identity(member('同名', 140))]
+        self.assertEqual(capture.member_page_overlap(previous, current), 0)
+
     def test_small_page_still_scrolls_and_obeys_member_page_size(self):
         main, panel, rows = member_scene(['甲', '乙', '丙'], rect=(900, 100, 1150, 220))
         panel.iface_scroll = FakeScroll(callback=lambda: setattr(rows[-1], 'name', '丁'))
@@ -192,6 +279,10 @@ class MemberScrollingTests(unittest.TestCase):
         self.assertEqual(args, (-1,))
         self.assertTrue(950 <= kwargs['x'] < 1120)
         self.assertTrue(150 <= kwargs['y'] < 450)
+        self.assertIn(kwargs['y'], [
+            (row.rectangle().top + row.rectangle().bottom) // 2
+            for row in capture.collect_member_items(panel, panel, (950, 150, 1120, 450))
+        ])
         self.assertEqual(mouse.scroll.call_count, 1)
 
     def test_missing_api_falls_back_to_wheel(self):
@@ -285,6 +376,7 @@ class MemberProcessingTests(unittest.TestCase):
             stack.enter_context(patch.object(capture, 'find_main_qq_window', return_value=main))
             stack.enter_context(patch.object(capture, 'time', Clock()))
             stack.enter_context(patch.object(capture, 'MAX_MEMBER_PAGE_TURNS', limit))
+            stack.enter_context(patch.object(capture, 'MAX_MEMBERS_PER_GROUP', 100))
             stack.enter_context(patch.object(capture, 'collect_qq_snapshot', return_value={'controls': {}, 'windows': {}}))
             stack.enter_context(patch.object(capture, 'click_control_in_work_area', side_effect=click))
             stack.enter_context(patch.object(capture, 'extract_member_number_from_popup',
@@ -292,7 +384,7 @@ class MemberProcessingTests(unittest.TestCase):
             save = stack.enter_context(patch.object(capture, 'append_number', return_value=True))
             scroll = stack.enter_context(patch.object(capture, 'scroll_member_list', side_effect=advance))
             result = capture.click_non_admin_members(main, mouse, object(), WORK_AREA, object(), object(),
-                                                     {}, object(), object(), set())
+                                                     {}, object(), object(), set(), {})
         return result, clicked, scroll.call_count, save.call_count
 
     def test_fewer_than_thirteen_members_continue_to_final_short_page(self):
@@ -301,6 +393,46 @@ class MemberProcessingTests(unittest.TestCase):
         self.assertEqual(result, (3, 0, 1, 3, 0, 0))
         self.assertEqual(scrolls, 2)
         self.assertEqual(saves, 3)
+
+    def test_overlapping_scroll_page_skips_old_rows_and_processes_new_row(self):
+        main, panel, rows = member_scene(['甲', '乙'])
+        new_row = member('丙', 180)
+        clicked = []
+        number_index = 0
+
+        def advance(*args):
+            panel._children = [rows[1], new_row]
+            return True, '已推进'
+
+        def read_number(*args):
+            nonlocal number_index
+            number_index += 1
+            return str(100000 + number_index), '模拟号码', {}
+
+        with ExitStack() as stack:
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(patch.object(capture, 'find_main_qq_window', return_value=main))
+            stack.enter_context(patch.object(capture, 'time', Clock()))
+            stack.enter_context(patch.object(capture, 'MAX_MEMBER_PAGE_TURNS', 1))
+            stack.enter_context(patch.object(capture, 'MAX_MEMBERS_PER_GROUP', 100))
+            stack.enter_context(patch.object(capture, 'collect_qq_snapshot',
+                                             return_value={'controls': {}, 'windows': {}}))
+            stack.enter_context(patch.object(
+                capture, 'click_control_in_work_area',
+                side_effect=lambda item, *args: clicked.append(item.name) or True,
+            ))
+            stack.enter_context(patch.object(
+                capture, 'extract_member_number_from_popup', side_effect=read_number,
+            ))
+            stack.enter_context(patch.object(capture, 'append_number', return_value=True))
+            stack.enter_context(patch.object(capture, 'scroll_member_list', side_effect=advance))
+            result = capture.click_non_admin_members(
+                main, Mock(), object(), WORK_AREA, object(), object(), {},
+                object(), object(), set(), {},
+            )
+
+        self.assertEqual(clicked, ['甲', '乙', '丙'])
+        self.assertEqual(result[:4], (3, 0, 1, 3))
 
     def test_same_named_members_on_same_and_later_pages_are_all_processed(self):
         result, clicked, scrolls, saves = self.run_processing([['同名', '同名'], ['同名']], limit=1)

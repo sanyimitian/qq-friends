@@ -293,76 +293,253 @@ def _native_window_exists(handle):
     return bool(win32gui.IsWindow(handle))
 
 
-def _wait_form_closed(window, original_handle, timeout, action='发送'):
+class SendUnconfirmed(RuntimeError):
+    """Sending may have occurred; retain a durable record and never resubmit."""
+
+
+class SendRejected(SendUnconfirmed):
+    def __init__(self, message, *, halt_run=False):
+        super().__init__(message)
+        self.halt_run = halt_run
+
+
+_SUCCESS_MESSAGES = {'发送成功', '申请已发送', '好友申请已发送', '验证消息已发送',
+                     '请求已发送', '请求发送成功', '添加成功', '已成为好友'}
+_FAILURE_MESSAGES = {'发送失败', '申请发送失败', '请求发送失败', '网络异常，请稍后重试',
+                     '对方进行了隐私设置，无法添加对方为好友', '验证答案错误'}
+_RESTRICTION_MESSAGES = {'操作过于频繁', '操作过于频繁，请稍后再试', '请勿频繁操作',
+                         '今日添加好友次数已达上限', '安全验证', '请输入验证码'}
+
+
+def _response_texts(window):
+    # Read every visible text node. A stale node means an incomplete snapshot.
+    texts = set()
+    for control in window.descendants():
+        if control.element_info.control_type is None:
+            raise RuntimeError('申请页控件正在刷新')
+        if control.element_info.control_type == 'Text' and control.is_visible():
+            texts.add(control.window_text().strip().rstrip('。！!'))
+    return texts
+
+
+def _transient_read(error):
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if _is_unavailable_element(error) or (isinstance(error, KeyError) and error.args == (None,)):
+            return True
+        if type(error).__name__ in {'COMError', 'ElementNotFoundError', 'ElementNotAvailableError'}:
+            return True
+        error = error.__cause__
+    return False
+
+
+def _retry_form_read(read, timeout=1.5):
     deadline = time.monotonic() + max(0, timeout)
     while True:
         check_stop()
+        try:
+            return read()
+        except Exception as error:
+            if not _transient_read(error) or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.15, deadline - time.monotonic()))
+
+
+def _refresh_form(window, handle):
+    if type(handle) is not int or handle <= 0:
+        return window
+    from pywinauto import Desktop
+    return Desktop(backend='uia').window(handle=handle).wrapper_object()
+
+
+def _wait_form_closed(window, original_handle, timeout, action='发送', *,
+                      process_id=None, expected_number=None, before_texts=()):
+    started = time.monotonic()
+    budget = max(20.0, timeout) if action == '发送' and timeout > 0 else max(0, timeout)
+    deadline = started + budget
+    logged = False
+    extended = False
+    last_read_error = None
+    before_texts = set(before_texts)
+    while True:
+        check_stop()
+        native_exists = None
         if original_handle:
             try:
-                if not _native_window_exists(original_handle):
+                native_exists = _native_window_exists(original_handle)
+                if not native_exists:
                     return
             except Exception:
-                # Failure to inspect an HWND is not evidence that it closed.
                 pass
+        busy = False
         try:
             if not window.is_visible():
                 return
+            if process_id is not None and window.process_id() != process_id:
+                raise SendUnconfirmed('申请窗口所属账号已变化，发送结果待核对；不会重复发送。')
+            if action == '发送':
+                texts = _response_texts(window)
+                fresh = texts - before_texts
+                restrictions = fresh & _RESTRICTION_MESSAGES
+                failures = fresh & _FAILURE_MESSAGES
+                if restrictions or failures:
+                    reason = sorted(restrictions or failures)[0]
+                    raise SendRejected('QQ 提示：' + reason + '；未确认发送成功。', halt_run=bool(restrictions))
+                same_target = expected_number is None or expected_number in texts or _FORM_LABEL not in texts
+                if (fresh & _SUCCESS_MESSAGES and same_target
+                        and window.window_text().strip() in _APPLICATION_TITLES):
+                    print('QQ 已显示申请提交成功提示；继续处理前关闭该申请窗口。', flush=True)
+                    return
+                busy = bool(texts & {'发送中', '正在发送', '正在提交', '提交中', '加载中'})
+            last_read_error = None
+        except SendUnconfirmed:
+            raise
         except Exception as error:
-            if _is_unavailable_element(error):
+            if _is_unavailable_element(error) and not original_handle:
                 return
-            raise RuntimeError(f'已触发{action}，但无法确认申请窗口是否关闭，请核对 QQ 中的申请状态。') from error
-        if time.monotonic() >= deadline:
+            last_read_error = error
+            try:
+                window = _refresh_form(window, original_handle)
+            except Exception:
+                pass
+        now = time.monotonic()
+        if action == '发送' and timeout > 0 and now - started >= timeout and not logged:
+            print(f'发送已触发，继续等待 QQ 确认（最多 {budget:g} 秒），不会重复点击发送。', flush=True)
+            logged = True
+        if now >= deadline:
+            if action == '发送' and timeout > 0 and busy and not extended:
+                deadline = now + 10
+                extended = True
+                print('QQ 仍在提交中，再等待 10 秒确认。', flush=True)
+                continue
+            if action == '发送':
+                if last_read_error is not None:
+                    raise SendUnconfirmed('已触发发送，但无法确认申请窗口是否关闭；该号码待核对，程序不会重复发送。') from last_read_error
+                raise SendUnconfirmed('已触发发送但申请窗口尚未关闭，也未检测到明确结果；该号码待核对，程序不会重复发送。')
             raise RuntimeError(f'已触发{action}但申请窗口尚未关闭，请核对 QQ 中的申请状态；程序不会再次触发操作。')
-        time.sleep(0.1)
+        time.sleep(min(0.2, max(0, deadline - now)))
 
 
-def click_verified_send(window, process_id, message, send_button_text='发送', *, expected_number=None, timeout=5):
-    """Invoke this verified form once, then confirm it is hidden or gone."""
-    _validate_message(message)
-    _validate_expected_number(expected_number)
-    check_stop()
-    if _read_message(window, process_id, expected_number=expected_number) != _normalized(message):
-        raise RuntimeError('好友验证信息已变化，与配置不一致，已停止发送。')
+def _send_button(window, text):
+    buttons = [control for control in window.descendants()
+               if control.element_info.control_type == 'Button'
+               and control.window_text().strip() == text
+               and control.is_visible() and control.is_enabled()]
+    if len(buttons) != 1:
+        raise RuntimeError('好友申请表单中未找到唯一可用的发送按钮，已停止发送。')
+    return buttons[0]
+
+
+def _native_click_ready(window, button, process_id):
+    import win32gui
+    import win32process
+    handle = window.handle
+    if not button.is_visible() or not button.is_enabled():
+        raise RuntimeError('发送按钮当前不可用，未点击发送。')
+    if (win32gui.GetForegroundWindow() != handle
+            or win32process.GetWindowThreadProcessId(handle)[1] != process_id):
+        raise RuntimeError('好友申请窗口未处于正确账号的前台，未点击发送。')
+    area, bounds = button.rectangle(), window.rectangle()
+    if not (bounds.left <= area.left < area.right <= bounds.right
+            and bounds.top <= area.top < area.bottom <= bounds.bottom):
+        raise RuntimeError('发送按钮位置不在申请窗口内，未点击发送。')
+    point = ((area.left + area.right) // 2, (area.top + area.bottom) // 2)
+    hit = win32gui.WindowFromPoint(point)
+    if hit != handle and win32gui.GetAncestor(hit, 2) != handle:
+        raise RuntimeError('发送按钮被其他窗口遮挡，未点击发送。')
+
+
+def _send_once(window, process_id, validate, send_button_text, expected_number, timeout):
+    _retry_form_read(validate)
+    original_handle = getattr(window, 'handle', None)
+    native = type(original_handle) is int and original_handle > 0
+    if native:
+        import win32con
+        import win32gui
+        from open_qq_add_friend import activate_window
+        activate_window(window, win32con, win32gui)
+    _retry_form_read(validate)
+    button = _retry_form_read(lambda: _send_button(window, send_button_text))
     try:
-        buttons = [
-            control for control in window.descendants()
-            if control.element_info.control_type == 'Button'
-            and control.window_text().strip() == send_button_text
-            and control.is_visible()
-            and control.is_enabled()
-        ]
-        if len(buttons) != 1:
-            raise RuntimeError('好友申请表单中未找到唯一可用的发送按钮，已停止发送。')
-        check_stop()
-        if _read_message(window, process_id, expected_number=expected_number) != _normalized(message):
-            raise RuntimeError('好友验证信息已变化，与配置不一致，已停止发送。')
-        original_handle = getattr(window, 'handle', None)
-        button = buttons[0]
-        fallback = False
+        before_texts = _response_texts(window)
+    except Exception:
+        # Incomplete pre-send text cannot establish which success labels are new.
+        before_texts = _visible_texts(window) | _SUCCESS_MESSAGES
+    if before_texts & (_RESTRICTION_MESSAGES | _FAILURE_MESSAGES):
+        raise RuntimeError('QQ 申请页已有失败或限制提示，请先处理该提示；未点击发送。')
+    invoke = None
+    if not native:
         try:
             invoke = button.iface_invoke
         except AttributeError:
-            fallback = True
+            pass
         except Exception as error:
             if not _is_no_pattern_error(error):
                 raise
-            fallback = True
-        if fallback:
+        if invoke is None:
             window.set_focus()
-            check_stop()
-            if _read_message(window, process_id, expected_number=expected_number) != _normalized(message):
-                raise RuntimeError('好友验证信息已变化，与配置不一致，已停止发送。')
+    check_stop()
+    _retry_form_read(validate)
+    if native:
+        button = _retry_form_read(lambda: _send_button(window, send_button_text))
+        _native_click_ready(window, button, process_id)
+    invocation_error = None
+    try:
+        # On native QQ windows, UIA Invoke can silently do nothing. Click the
+        # verified foreground button exactly once; never fall back after acting.
+        if native or invoke is None:
             button.click_input()
         else:
-            # Do not wrap Invoke in the missing-pattern handler: an exception
-            # after invocation begins can mean the request was already sent.
             invoke.Invoke()
-    except RuntimeError:
-        raise
     except Exception as error:
-        raise RuntimeError('好友申请表单发送过程未完成，请核对 QQ 中的申请状态；程序不会重复触发发送。') from error
-    _wait_form_closed(window, original_handle, timeout)
+        if type(error).__name__ == 'FailSafeException':
+            raise
+        invocation_error = error
+    try:
+        _wait_form_closed(window, original_handle, timeout, process_id=process_id,
+                          expected_number=expected_number, before_texts=before_texts)
+    except SendUnconfirmed as error:
+        if invocation_error is not None:
+            raise error from invocation_error
+        raise
     return True
+
+
+def click_verified_send(window, process_id, message, send_button_text='发送', *, expected_number=None, timeout=5):
+    _validate_message(message)
+    _validate_expected_number(expected_number)
+    def validate():
+        if _read_message(window, process_id, expected_number=expected_number) != _normalized(message):
+            raise RuntimeError('好友验证信息已变化，与配置不一致，已停止发送。')
+    return _send_once(window, process_id, validate, send_button_text, expected_number, timeout)
+
+
+def close_submitted_form(window, process_id, expected_number, timeout=3):
+    """Close only the verified application; closing never resubmits a request."""
+    handle = getattr(window, 'handle', None)
+    if type(handle) is int and handle > 0 and not _native_window_exists(handle):
+        return
+    if not window.is_visible():
+        return
+    if window.process_id() != process_id or window.window_text().strip() not in _APPLICATION_TITLES:
+        raise RuntimeError('申请窗口身份已变化，未自动关闭。')
+    texts = _retry_form_read(lambda: _response_texts(window))
+    if _FORM_LABEL in texts and expected_number not in texts:
+        raise RuntimeError('申请窗口号码不匹配，未自动关闭。')
+    if _FORM_LABEL not in texts and not texts & _SUCCESS_MESSAGES:
+        raise RuntimeError('无法确认需关闭的申请窗口，未自动关闭。')
+    check_stop()
+    if type(handle) is int and handle > 0:
+        import win32con
+        import win32gui
+        import win32process
+        if win32process.GetWindowThreadProcessId(handle)[1] != process_id:
+            raise RuntimeError('申请窗口所属账号变化，未自动关闭。')
+        win32gui.PostMessage(handle, win32con.WM_CLOSE, 0, 0)
+    else:
+        window.close()
+    _wait_form_closed(window, handle, timeout, action='关闭')
 
 
 def _validate_unconfigured_form(window, process_id, expected_number):

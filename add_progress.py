@@ -69,9 +69,10 @@ class AttemptJournal:
     in the journal are diagnostic only and are never used to recover workbook data.
     """
 
-    def __init__(self, number_file, sheet_name, processed_marker='已处理'):
+    def __init__(self, number_file, sheet_name, processed_marker='已处理', *, allowed_sheets=None):
         self.source = _canonical_source(number_file)
         self.sheet = str(sheet_name)
+        self.allowed_sheets = None if allowed_sheets is None else set(allowed_sheets)
         self.processed_marker = processed_marker
         directory = state_home() / 'add_recovery'
         directory.mkdir(parents=True, exist_ok=True)
@@ -100,18 +101,32 @@ class AttemptJournal:
             if not isinstance(record, dict):
                 raise self._invalid('号码记录格式不正确。')
             try:
-                self._validate_record(number, record.get('rows'), record.get('state'))
+                self._validate_record(
+                    number, record.get('rows'), record.get('state'), record.get('reason')
+                )
             except ValueError as error:
                 raise self._invalid(str(error)) from error
         if records and payload['sheet'] != self.sheet:
-            raise self._invalid(
-                f'仍有未恢复记录属于工作表“{payload["sheet"]}”，当前选择的是“{self.sheet}”；'
-                '请切回原工作表处理。'
-            )
+            if self.allowed_sheets is not None and payload['sheet'] in self.allowed_sheets:
+                self.sheet = payload['sheet']
+            else:
+                raise self._invalid(
+                    f'仍有未恢复记录属于工作表“{payload["sheet"]}”，当前选择的是“{self.sheet}”；'
+                    '请切回原工作表处理。'
+                )
         self.records = records
 
+    def select_sheet(self, sheet_name):
+        """Switch only after the previous attempt is saved and its journal cleared."""
+        if self.records and sheet_name != self.sheet:
+            raise self._invalid('当前工作表仍有未恢复的记录，不能切换工作表。')
+        if self.allowed_sheets is not None and sheet_name not in self.allowed_sheets:
+            raise self._invalid('目标工作表不属于当前号码文件。')
+        self.sheet = str(sheet_name)
+
+
     @staticmethod
-    def _validate_record(number, rows, state):
+    def _validate_record(number, rows, state, reason=None):
         if not isinstance(number, str) or re.fullmatch(r'[0-9]{5,12}', number) is None:
             raise ValueError('恢复记录中的 QQ 号不正确。')
         if (not isinstance(rows, list) or not rows
@@ -119,6 +134,8 @@ class AttemptJournal:
             raise ValueError('恢复记录中的行号不正确。')
         if state not in ('sending', 'processed'):
             raise ValueError('恢复记录中的处理阶段不正确。')
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError('恢复记录中的跳过原因不正确。')
 
     def _persist(self, records):
         payload = {'version': 1, 'source': self.source, 'sheet': self.sheet, 'records': records}
@@ -137,13 +154,15 @@ class AttemptJournal:
             except OSError:
                 pass
 
-    def record(self, number, rows, state):
+    def record(self, number, rows, state, reason=None):
         rows = list(rows)
-        self._validate_record(number, rows, state)
+        self._validate_record(number, rows, state, reason)
         if self.records.get(number, {}).get('state') == 'processed' and state == 'sending':
             raise RuntimeError(f'QQ {number} 已有待写回的处理记录，请先恢复号码表。')
         records = dict(self.records)
         records[number] = {'rows': rows, 'state': state}
+        if reason:
+            records[number]['reason'] = reason
         self._persist(records)
         self.records = records
 
@@ -161,7 +180,7 @@ class AttemptJournal:
                 raise RuntimeError(f'号码表已保存，但恢复记录暂时无法清理：{self.path}。请再次开始以完成核对。') from error
         self.records = records
 
-    def recover(self, numbers, mark_callback, all_numbers=None):
+    def recover(self, numbers, mark_callback, all_numbers=None, *, defer_uncertain=None):
         """Recover known attempts; block uncertain sends before any QQ interaction."""
         pending = dict(numbers)
         known = set(pending) if all_numbers is None else set(all_numbers)
@@ -175,7 +194,7 @@ class AttemptJournal:
                     f'恢复记录中的 QQ {number} 已不在当前工作表，已停止且未按旧行号写入。'
                     f'请核对号码表和恢复文件：{self.path}'
                 )
-            if number in pending and record['state'] == 'sending':
+            if number in pending and record['state'] == 'sending' and defer_uncertain is None:
                 raise RuntimeError(
                     f'QQ {number} 上次可能已点击发送，程序不会自动重复发送。请先在 QQ 中核对；'
                     f'如已发送或希望跳过，请将该号码 C 列标为“{self.processed_marker}”并保存关闭表格；'
@@ -183,8 +202,18 @@ class AttemptJournal:
                 )
         recovered = set()
         for number in list(self.records):
+            if number in pending and self.records[number]['state'] == 'sending':
+                reason = self.records[number].get('reason') or '上次已触发发送但结果未确认，待核对；不会自动重发'
+                defer_uncertain(pending[number], reason)
+                print(f'QQ {number} 的发送结果待核对，本次不重复发送，继续同表其他号码。', flush=True)
+                recovered.add(number)
+                continue
             if number in pending:
-                mark_callback(pending[number])
+                reason = self.records[number].get('reason')
+                if reason:
+                    mark_callback(pending[number], reason)
+                else:
+                    mark_callback(pending[number])
                 recovered.add(number)
             self.clear(number)
         return [(number, rows) for number, rows in numbers if number not in recovered]

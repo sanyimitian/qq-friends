@@ -90,6 +90,16 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(result, [('654321', [2])])
         self.assertFalse(journal.path.exists())
 
+    def test_processed_skip_reason_survives_recovery(self):
+        journal = self.journal()
+        journal.record('123456', [1], 'processed', reason='搜索无结果')
+        recovered = self.journal().recover([('123456', [8])], Mock())
+        self.assertEqual(recovered, [])
+        callback = Mock()
+        journal.record('123456', [1], 'processed', reason='没有可点击的添加按钮')
+        self.journal().recover([('123456', [9, 10])], callback)
+        callback.assert_called_once_with([9, 10], '没有可点击的添加按钮')
+
     def test_sending_record_blocks_replay_and_retains_journal(self):
         journal = self.journal()
         journal.record('123456', [1], 'sending')

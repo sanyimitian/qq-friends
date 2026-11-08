@@ -1,0 +1,79 @@
+{
+  "source": "\\\\vmware-host\\Shared Folders\\VMShare\\sub\\qq-friends",
+  "files": {
+    "add_app.py": "9573a2c8ed5f2cef6bf7cc93624a738fa23b08695c30bba35508cb50adacd935",
+    "add_progress.py": "701192c792956ceb3619d4ab33a497d1b80851427a7a081894b541eeff97b349",
+    "capture_app.py": "39e597e036cba1f5dcf0e225e5556ad6ebe2a2b0d953833c1e2ee3bc17fd6061",
+    "check_environment.py": "b138d92d5b0e02bf31c53ca097c214a33401d44d815fc09553a77a8d48a29c26",
+    "desktop_app.py": "c7f8a70fb0ff3046ffacdf662941c9f289f247672ae490c6d2ff6c4eb9738d1b",
+    "gui_config.py": "21889b56ce21f888ad85f07c2b4e55158569464c6e3cdc57ebe571cf7e34ef9a",
+    "gui_controller.py": "26ff3c44567ad7bc4c55f93f0882f7c99c25483ad6b30ffcdb518870f752f54e",
+    "gui_worker.py": "a30b747f30bf54e88c33549437ae83f37f9bc90b1f42486d7118ed2f26c0afce",
+    "open_qq_add_friend.py": "9afd2af8d5866930bff6727e10721f53150310c5146b4fc9cfac699f9206a1c4",
+    "package_check.py": "e9011013e737fc9da2bbdd0a072b0c2e108290a3768fb52c6ea82a010fdf8a53",
+    "prepare_numbers.py": "fe608474ec863a59b4a56fba87780cdfd901e6d200438472651ebb8d1f61c5ff",
+    "qq_verification.py": "ceeb9f6d4b7c6f8799e69f295d5e68c3e0f5f1474ed43794725d710e0d6ef833",
+    "task_control.py": "90a117c58f52ca005c57408f5b291726e5844ccea3df918bc565b6d8b31fba2e",
+    "zq_qq_001.py": "c17a041d00b67f0c4315018fd0e72b5ea482210ec12b8ca6fed21dc5fe676622",
+    "test_capture_detection.py": "41f653dba44e17b2c1b87dff91d899ef7fa91a137a5f4f8c1e5c2e26ebaa8af4",
+    "test_capture_navigation.py": "625cb9267330224f310c8ffc5ca103e7f51895ea5cd3b65a99bfdad68821408f",
+    "test_zq_qq_sections.py": "3d2037d025b5967fcca145ebbe4d10b1cea88e15576cb9fa06170b799fac3a7c",
+    "test_desktop_apps.py": "d09b70ea253c59f4f3fa363541cc112ca941facf9650d4a04b2bc954af019936"
+  },
+  "presentation_changes": {
+    "desktop_app.py": [
+      "__init__",
+      "set_busy"
+    ],
+    "desktop_ui.py": "Project qq-desktop-ui layout and presentation-only field labels"
+  },
+  "effective_sha256": {
+    "add_app.py": "9573a2c8ed5f2cef6bf7cc93624a738fa23b08695c30bba35508cb50adacd935",
+    "add_progress.py": "701192c792956ceb3619d4ab33a497d1b80851427a7a081894b541eeff97b349",
+    "capture_app.py": "39e597e036cba1f5dcf0e225e5556ad6ebe2a2b0d953833c1e2ee3bc17fd6061",
+    "capture_hotkey.py": "74a618759e277a5fa75ae99b773235673df9cffc4078438ebd1ba7ff7e684549",
+    "capture_progress.py": "fea0eef47b7ff585384f7d58a605a545d8b57168acb2a8507d2e92f0d4c029e9",
+    "check_environment.py": "b138d92d5b0e02bf31c53ca097c214a33401d44d815fc09553a77a8d48a29c26",
+    "desktop_app.py": "122c00561b3a262357765a340d86b19481a1096250b2e368ef7e8e335d6a660e",
+    "desktop_ui.py": "b9689efda67a104b3947dc18ef606d0858f0cb6b44141d3c1d5387563f838a0f",
+    "gui_config.py": "bcd8139f55a28ab5a681744cb9502b17574fed25321ecc4e1608f250ca2e8006",
+    "gui_controller.py": "9fb69e50014f9254ad4381cb76c0133c3f1084c951a713fbf80c6947092f3930",
+    "gui_worker.py": "3ff55c5283b7efd51e4f75e014c9cf20ac5a99bdaebfe95c85871091d7fbe041",
+    "open_qq_add_friend.py": "9afd2af8d5866930bff6727e10721f53150310c5146b4fc9cfac699f9206a1c4",
+    "package_check.py": "0ec9596379f511527a297607f5b2821385e8ede079b46a1a67207a5d82c0832a",
+    "prepare_numbers.py": "fe608474ec863a59b4a56fba87780cdfd901e6d200438472651ebb8d1f61c5ff",
+    "qq_verification.py": "ceeb9f6d4b7c6f8799e69f295d5e68c3e0f5f1474ed43794725d710e0d6ef833",
+    "task_control.py": "c09f215b3d1f561aaf13c9ae766392cddcb16d3e8f8331bcac263ff95dbd9d0d",
+    "test_capture_detection.py": "41f653dba44e17b2c1b87dff91d899ef7fa91a137a5f4f8c1e5c2e26ebaa8af4",
+    "test_capture_navigation.py": "b7b454aaad93a069ee3ac13fe843accad1f4ae12b9349c2f3292c07a75e05c4e",
+    "test_capture_resume.py": "56c3f2d21955127cf0635c6a029c3af7e65669a992cbf2d7bec7fb1e5dae07b9",
+    "test_desktop_apps.py": "d1cc21d3723cb7a40405283de96998c232f0e51f8c58a31cd95b072ee89f3af5",
+    "test_zq_qq_sections.py": "b5627661586513711f0bc52977e7a1065c6b38dec76d52aee6c5993d272b2797",
+    "zq_qq_001.py": "82c7046aeaeac80014921654d4eb0296f7c8610d50bc355c0f86683856022ebb",
+    "test_capture_ready.py": "2625704a032ae1b11651fb0163fa764e75df9e5b0738fefb1e1acb0bd35b9646",
+    "README.md": "4226edc458c1c5c288c32ce92366bcd95845f93dc1d68737d692deb355136b9c"
+  },
+  "restored_features": {
+    "date": "2026-11-07",
+    "features": [
+      "Ctrl+B pause/resume",
+      "durable member checkpoints",
+      "group_name_group_number worksheets"
+    ],
+    "backup": "../build/restore_capture_features/before"
+  },
+  "readiness_restoration": {
+    "date": "2026-11-07",
+    "source_backup": "C:\\Users\\40177\\Desktop\\QQ桌面工具\\qq-friends\\build\\restore_ready\\active_before_20261107_231448",
+    "exe_backup": "C:\\Users\\40177\\Desktop\\QQ桌面工具\\qq-friends\\build\\restore_ready\\QQ群成员采集.before_restore_ready_20261107_231525.exe",
+    "default_enabled": true,
+    "original_timeouts_preserved": true,
+    "unrelated_functions_verified": 66,
+    "capture_tests_passed": 109,
+    "packaged_smoke_passed": true,
+    "installed_sha256": "40f6f5d483da80304e089bc8408d16f2e1c7b6f23815e69210b3aa782b526330"
+  },
+  "append_and_ready_verification": "../build/foreground_fix/acceptance_append.json",
+  "profile_latency_verification": "../build/profile_latency/live_check.json",
+  "completed_skip_verification": "../build/completed_skip/verification.json"
+}

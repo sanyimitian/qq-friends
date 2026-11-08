@@ -8,7 +8,8 @@ import re
 import sys
 
 
-DEFAULT_VERIFICATION_MESSAGE = '您好，0.18稳定不降智中转免费送额度，欢迎来试，地址看头像'
+DEFAULT_VERIFICATION_MESSAGE = 'GP七0.1倍率，看头像，q群管理员有试用额度'
+DEFAULT_QUESTION_ANSWER = 'GP七0.1倍率，看头像，q群管理员有试用额度'
 DEFAULT_CAPTURE_QQ_NUMBER = '3805745874'
 
 
@@ -71,13 +72,14 @@ def fields(mode):
     if mode != 'add':
         raise ValueError('未知程序类型')
     return [
-        Field('NUMBER_FILE_PATH', '待处理号码表', 'open_numbers', str(data / 'qq_member_numbers.xlsx'), hint='直接选择采集的 Excel（.xlsx），兼容 ODS。A 列为号码，B 列忽略，C 列“已处理”自动跳过并写回原文件。'),
+        Field('NUMBER_FILE_PATH', '待处理号码表', 'open_numbers', str(Path.home() / 'Desktop' / 'qq_member_numbers1.xlsx'), hint='Excel 按标签从左到右逐表处理，当前表完成后再进入下一张；C 列已处理号码跳过，兼容 ODS。'),
         Field('QQ_EXE', 'QQ 安装位置', 'exe', r'D:\01App\Tencent\QQNT\QQ.exe', hint='请先登录 QQ；程序通过已登录窗口操作。'),
         add_window,
-        Field('NUMBERS_PER_ACCOUNT', '每个账号本次处理数量', 'int', 3, minimum=1, hint='不足这个数量时结束；每个账号处理一个批次。'),
+        Field('NUMBERS_PER_ACCOUNT', '每个账号本次处理数量', 'int', 3, minimum=1, hint='每个账号处理一个批次；Excel 剩余不足此数时也会处理，不跨过未完成的工作表。'),
         Field('EXCLUDED_QQ_ACCOUNTS', '不使用的 QQ 账号', 'lines', [], hint='每行一个 QQ 号；清空表示不排除。'),
         Field('VERIFICATION_MESSAGE', '加好友验证信息', 'multiline', DEFAULT_VERIFICATION_MESSAGE, hint='填写申请表单的验证信息，不修改好友备注。关闭自动发送时，填好后停留在申请表单。'),
         Field('AUTO_SEND', '自动点击申请表单的“发送”', 'bool', True, hint='勾选会实际发送申请。关闭时，在首个申请表单处结束且不标记该号码。'),
+        Field('QUESTION_ANSWER', '验证问题统一回答', 'optional_multiline', DEFAULT_QUESTION_ANSWER, hint='对方要求回答问题时，每个问题都填这段内容；留空则跳过。'),
         Field('NUMBER_INTERVAL_SECONDS', '号码之间等待 / 秒', 'float', 1.0),
         Field('AVATAR_AUTO_DETECT', '自动适配“某某的头像”按钮', 'bool', True),
         Field('CLOSE_SECONDARY_WINDOWS', '切换账号前关闭附属 QQ 窗口', 'bool', True),
@@ -127,6 +129,10 @@ def validate(mode, raw, for_run=False):
                 value = str(value).strip()
                 if re.fullmatch(r'[0-9]{5,12}', value) is None:
                     raise ValueError('请输入 5～12 位纯数字 QQ 号')
+            elif field.kind == 'optional_multiline':
+                if not isinstance(value, str):
+                    raise ValueError('必须是文本')
+                value = value.strip()
             elif field.kind == 'lines':
                 value = value.splitlines() if isinstance(value, str) else value
                 if not isinstance(value, list):

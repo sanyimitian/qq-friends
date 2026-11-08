@@ -290,7 +290,7 @@ class ReadAccountTests(unittest.TestCase):
         screen = desktop(main)
         with patch.object(adding, 'activate_window') as activate, \
              patch.object(adding, 'find_own_profile_account',
-                          side_effect=[None, None, '123456789']) as find_profile, \
+                          side_effect=[None, None, None, '123456789']) as find_profile, \
              patch.object(adding, 'time', clock):
             self.assertEqual(adding.read_qq_account_from_avatar(
                 main, mouse, Mock(), Mock(), desktop=screen), '123456789')
@@ -309,7 +309,7 @@ class ReadAccountTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 adding.read_qq_account_from_avatar(main, Mock(), Mock(), Mock(),
                                                   desktop=desktop(main))
-        own.click_input.assert_called_once()
+        self.assertEqual(own.click_input.call_count, 4)
 
 
 class MissingMainWindowTests(unittest.TestCase):
@@ -318,6 +318,7 @@ class MissingMainWindowTests(unittest.TestCase):
         with patch.object(adding.sys, 'platform', 'win32'), \
              patch.object(adding, 'NUMBERS_PER_ACCOUNT', 3), \
              patch.object(adding, 'TARGET_PROCESS_ID', process), \
+             patch.object(adding, 'ensure_number_file_writable'), \
              patch.object(adding, 'load_dependencies', return_value=dependencies), \
              patch.object(adding, 'find_qq_windows', return_value=[]), \
              patch.object(adding, 'read_qq_account_from_avatar') as read_account, \

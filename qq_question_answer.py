@@ -71,19 +71,41 @@ def prepare_verification_form(desktop, process_id, message, timeout=5, *,
                               expected_number=None, question_answer=''):
     if not isinstance(question_answer, str):
         raise ValueError('验证问题统一回答必须是文本。')
+    deadline = original.time.monotonic() + max(0, timeout)
     try:
         return original.prepare_verification_form(
             desktop, process_id, message, timeout, expected_number=expected_number)
     except original.NoVerificationField as missing:
-        window = missing.window
-        forms = [w for w in desktop.windows()
-                 if w.process_id() == process_id and w.is_visible()
-                 and w.window_text().strip() in original._APPLICATION_TITLES
-                 and original._FORM_LABEL in original._visible_texts(w)]
-        if len(forms) != 1:
-            raise RuntimeError('所选 QQ 有多个好友申请表单，请关闭多余表单后重试。')
+        # Reacquire the exact target: UIA can briefly omit a refreshing window.
+        while True:
+            check_stop()
+            forms = {}
+            for candidate in desktop.windows():
+                try:
+                    if (candidate.process_id() != process_id or not candidate.is_visible()
+                            or candidate.window_text().strip() not in original._APPLICATION_TITLES):
+                        continue
+                    texts = original._visible_texts(candidate)
+                    if original._FORM_LABEL not in texts or expected_number not in texts:
+                        continue
+                    handle = getattr(candidate, 'handle', None)
+                    key = ('handle', handle) if type(handle) is int and handle > 0 else ('object', id(candidate))
+                    forms[key] = candidate
+                except Exception:
+                    continue
+            if len(forms) > 1:
+                raise RuntimeError(f'目标 QQ 有多个好友申请表单（{len(forms)} 个），未填写或发送。')
+            if forms:
+                window = next(iter(forms.values()))
+                break
+            if original.time.monotonic() >= deadline:
+                raise RuntimeError('目标 QQ 的好友申请表单未加载或已关闭（找到 0 个），未填写或发送。')
+            original.time.sleep(0.1)
+        if original._MESSAGE_LABEL in original._visible_texts(window):
+            return original.prepare_verification_form(
+                desktop, process_id, message, max(0, deadline - original.time.monotonic()),
+                expected_number=expected_number)
         questions = _questions(window, process_id, expected_number)
-        deadline = original.time.monotonic() + max(0, timeout)
         signature = tuple(q for q, _ in questions)
         stable_since = original.time.monotonic()
         while True:

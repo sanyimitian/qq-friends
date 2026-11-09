@@ -52,12 +52,13 @@ class Control:
         return [child for child in self._children
                 if control_type is None or child.element_info.control_type == control_type]
 
-    def descendants(self, control_type=None):
+    def descendants(self, control_type=None, title=None):
         result = []
         for child in self._children:
-            if control_type is None or child.element_info.control_type == control_type:
+            if ((control_type is None or child.element_info.control_type == control_type)
+                    and (title is None or child.window_text() == title)):
                 result.append(child)
-            result.extend(child.descendants(control_type=control_type))
+            result.extend(child.descendants(control_type=control_type, title=title))
         return result
 
     def parent(self):

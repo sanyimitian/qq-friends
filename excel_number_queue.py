@@ -128,7 +128,7 @@ class ExcelNumberQueue:
         if changed:
             atomic_save(self.document, self.path)
 
-    def recover(self, journal, *, defer_uncertain=False):
+    def recover(self, journal, *, defer_uncertain=False, skip_uncertain=False):
         if journal.records:
             title = journal.sheet
             if title not in self.entries:
@@ -138,6 +138,8 @@ class ExcelNumberQueue:
             def mark(rows, reason=None):
                 self.mark(row_numbers[rows[0]], reason=reason)
             options = {}
+            if skip_uncertain:
+                options['skip_uncertain'] = True
             if defer_uncertain:
                 options['defer_uncertain'] = lambda rows, reason: self.mark(
                     row_numbers[rows[0]], reason=reason, mark_processed=False)

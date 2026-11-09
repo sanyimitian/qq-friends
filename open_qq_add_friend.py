@@ -19,6 +19,7 @@ from qq_verification import (
     SendUnconfirmed,
     SendRejected,
     close_submitted_form,
+    close_number_forms,
     cancel_unconfigured_form,
 
 )
@@ -1087,6 +1088,24 @@ def click_send_button(desktop, process_id, timeout=5, *, form=None, expected_num
                                expected_number=expected_number, timeout=timeout)
 
 
+class NumberActionError(RuntimeError):
+    """A recoverable UI failure for one number, never a persistence failure."""
+
+
+def number_action(action, *args, **kwargs):
+    try:
+        return action(*args, **kwargs)
+    except NoVerificationField:
+        raise
+    except Exception as error:
+        # Respect explicit cancellation and QQ's account-wide restrictions.
+        if type(error).__name__ == 'FailSafeException':
+            raise
+        if isinstance(error, SendRejected) and error.halt_run:
+            raise
+        raise NumberActionError(f'{type(error).__name__}: {error}') from error
+
+
 def current_sheet_numbers(sheet, number_file, TableRow, TableCell, extract_text):
     """用于恢复记录核对；包含当前工作表中已经标记的号码。"""
     if Path(number_file).suffix.lower() == '.xlsx':
@@ -1314,13 +1333,13 @@ def main():
 
     pending_before_recovery = len(numbers)
     if queue is not None:
-        numbers = queue.recover(journal, defer_uncertain=True)
+        numbers = queue.recover(journal, skip_uncertain=True)
         print(f'按 Excel 标签顺序处理 {len(queue.sheets)} 张工作表；当前表处理完才进入下一张，跨表重复号码只处理一次。')
     else:
         numbers = journal.recover(
             numbers, recover_marker,
             all_numbers=current_sheet_numbers(number_sheet, number_file, TableRow, TableCell, extract_text),
-            defer_uncertain=lambda rows, reason: save_marker(rows, reason=reason, mark_processed=False),
+            skip_uncertain=True,
         )
     if len(numbers) < pending_before_recovery:
         print(f'已恢复上次记录；本次跳过 {pending_before_recovery - len(numbers)} 个已处理或发送待核对的号码。')
@@ -1340,6 +1359,7 @@ def main():
     ignored_result_count = 0
     timeout_numbers = []
     uncertain_numbers = []
+    error_numbers = []
     processed_count = 0
     last_sheet = None
     print(f"共读取到 {len(numbers)} 个不重复号码，每个账号处理 {NUMBERS_PER_ACCOUNT} 个。")
@@ -1372,20 +1392,15 @@ def main():
             close_qq_secondary_windows(
                 desktop, [account_window], win32con, win32gui
             )
-        account_label = account if account is not None else f'所选窗口（进程 {account_window.process_id()}）'
+        process_id = account_window.process_id()
+        account_label = account if account is not None else f'所选窗口（进程 {process_id}）'
         print(
             f"使用第 {account_index}/{len(accounts)} 个账号窗口 {account_label}，"
             f"处理接下来的 {batch_size} 个号码。"
         )
 
-        window, page = open_add_friend_page(
-            desktop, win32con, win32gui, account_window
-        )
-        user_tab_selected = select_user_tab(page)
-        if user_tab_selected:
-            print("已选择 QQ 搜索页的“用户”选项。")
-        else:
-            print("无法识别或切换“用户”选项，将只接受明确标注为用户的结果。")
+        window, page = account_window, None
+        user_tab_selected = False
 
         batch_end = processed_count + batch_size
         while processed_count < batch_end:
@@ -1408,90 +1423,92 @@ def main():
                     last_sheet = title
             index = processed_count + 1
             print(f"账号 {account_label} 正在搜索第 {index}/{len(numbers)} 个号码：{number}。")
-            state, attempts = search_number(page, number, user_tab_selected)
             processed_count += 1
             skip_reason = None
             submitted_form = None
-            if state == "no_results":
-                no_result_count += 1
-                skip_reason = '搜索无结果'
-                print(f"第 {index} 个号码无搜索结果，继续下一个。")
-            elif state == "ignored":
-                ignored_result_count += 1
-                skip_reason = '搜索结果不是明确的用户结果'
-                print(f"第 {index} 个号码的结果不是明确的用户结果，已忽略并继续。")
-            elif state == "timeout":
-                timeout_numbers.append(number)
-                skip_reason = f'搜索超时，已重试 {attempts} 次'
-                if queue is not None:
-                    save_marker(source_rows, reason=skip_reason, mark_processed=False)
-                    print('搜索超时未标记完成；继续当前表，未处理完不进入下一张。')
-                    time.sleep(NUMBER_INTERVAL_SECONDS)
-                    continue
-                print(f"第 {index} 个号码搜索超时，已重试 {attempts} 次并记录，继续下一个。")
-            else:
-                print(f"第 {index} 个号码的搜索结果已加载。")
-                if click_result_add_button(page, expected_number=number):
-                    print(f"已点击第 {index} 个号码结果中的“添加”按钮。")
-                    try:
-                        form = prepare_verification_form(
-                            desktop, window.process_id(), VERIFICATION_MESSAGE, PAGE_TIMEOUT_SECONDS,
-                            expected_number=number, question_answer=QUESTION_ANSWER,
-                        )
-                    except NoVerificationField as missing_field:
-                        cancel_unconfigured_form(
-                            missing_field.window, window.process_id(), number, SEND_TIMEOUT_SECONDS
-                        )
-                        skip_reason = getattr(missing_field, 'reason', '申请页没有验证信息输入框，已取消且未发送')
-                        try:
-                            save_marker(source_rows, reason=skip_reason, mark_processed=False)
-                        except Exception as error:
-                            raise RuntimeError(
-                                f'无法保存 QQ 号 {number} 的跳过原因：{error}'
-                            ) from error
-                        print(
-                            f'QQ 号 {number}：{skip_reason}；未标记。'
-                            '已将原因写入号码表 D 列，继续处理下一个号码。'
-                        )
-                        time.sleep(NUMBER_INTERVAL_SECONDS)
-                        continue
-                    print('好友申请已准备并核对；无验证信息框时无需填写。')
-                    if not AUTO_SEND:
-                        print("自动发送已关闭，已填写申请表单；本次在此停止，该号码未标记。")
-                        return
-                    # 发送前落盘；即使此刻按停止，也不能在下次启动时无记录重发。
-                    journal.record(number, source_rows, 'sending')
-                    try:
-                        if not click_send_button(desktop, window.process_id(), SEND_TIMEOUT_SECONDS,
-                                                 form=form, expected_number=number):
-                            raise SendUnconfirmed('发送动作未确认，请核对该号码的申请状态。')
-                    except SendUnconfirmed as error:
-                        reason = f'发送待核对：{error}'
-                        journal.record(number, source_rows, 'sending', reason=reason)
-                        save_marker(source_rows, reason=reason, mark_processed=False)
-                        uncertain_numbers.append(number)
-                        print(f'QQ {number}：{reason}；已记录 D 列，未标记完成，不会重复发送。', flush=True)
-                        if isinstance(error, SendRejected) and error.halt_run:
-                            raise RuntimeError('QQ 提示频率限制或安全验证，已保留记录并停止；请在 QQ 中处理后再运行。') from error
-                        try:
-                            close_submitted_form(getattr(form, 'window', form), window.process_id(), number)
-                        except Exception as close_error:
-                            raise RuntimeError('发送结果已记录为待核对，但申请页无法安全关闭；请手动关闭后重新开始，同一号码不会重发。') from close_error
-                        print('已关闭本次申请页，继续当前工作表的其他号码。', flush=True)
-                        time.sleep(NUMBER_INTERVAL_SECONDS)
-                        continue
-                    submitted_form = getattr(form, 'window', form)
-                    print(f'QQ 号 {number}：已确认申请提交结束，不代表对方已通过。')
+            send_started = False
+            needs_cleanup = False
+            try:
+                if page is None:
+                    window, page = number_action(
+                        open_add_friend_page, desktop, win32con, win32gui, account_window)
+                    user_tab_selected = number_action(select_user_tab, page)
+                    if user_tab_selected:
+                        print('已选择 QQ 搜索页的“用户”选项。')
+                    else:
+                        print('无法识别或切换“用户”选项，将只接受明确标注为用户的结果。')
+                state, attempts = number_action(search_number, page, number, user_tab_selected)
+                if state == "no_results":
+                    no_result_count += 1
+                    skip_reason = '搜索无结果'
+                    print(f"第 {index} 个号码无搜索结果，继续下一个。")
+                elif state == "ignored":
+                    ignored_result_count += 1
+                    skip_reason = '搜索结果不是明确的用户结果'
+                    print(f"第 {index} 个号码的结果不是明确的用户结果，已忽略并继续。")
+                elif state == "timeout":
+                    timeout_numbers.append(number)
+                    skip_reason = f'搜索超时，已重试 {attempts} 次；已跳过'
+                    needs_cleanup = True
                 else:
-                    skip_reason = '搜索结果中没有可点击的添加按钮'
-                    print(f"第 {index} 个号码结果已处理；没有可点击的“添加”按钮，跳过。")
+                    print(f"第 {index} 个号码的搜索结果已加载。")
+                    if number_action(click_result_add_button, page, expected_number=number):
+                        print(f"已点击第 {index} 个号码结果中的“添加”按钮。")
+                        try:
+                            form = number_action(
+                                prepare_verification_form, desktop, process_id,
+                                VERIFICATION_MESSAGE, PAGE_TIMEOUT_SECONDS,
+                                expected_number=number, question_answer=QUESTION_ANSWER,
+                            )
+                        except NoVerificationField as missing_field:
+                            number_action(cancel_unconfigured_form, missing_field.window,
+                                          process_id, number, SEND_TIMEOUT_SECONDS)
+                            skip_reason = getattr(missing_field, 'reason', '申请页没有验证信息输入框，已取消且未发送')
+                            needs_cleanup = True
+                        else:
+                            print('好友申请已准备并核对；无验证信息框时无需填写。')
+                            if not AUTO_SEND:
+                                print("自动发送已关闭，已填写申请表单；本次在此停止，该号码未标记。")
+                                return
+                            # Persistence errors must escape: never send without a durable record.
+                            journal.record(number, source_rows, 'sending')
+                            send_started = True
+                            try:
+                                sent = number_action(
+                                    click_send_button, desktop, process_id,
+                                    SEND_TIMEOUT_SECONDS, form=form, expected_number=number)
+                            except SendRejected as error:
+                                reason = f'发送待核对：{error}'
+                                journal.record(number, source_rows, 'sending', reason=reason)
+                                save_marker(source_rows, reason=reason, mark_processed=False)
+                                raise RuntimeError('QQ 提示频率限制或安全验证，已保留记录并停止；请在 QQ 中处理后再运行。') from error
+                            if not sent:
+                                raise NumberActionError('发送动作未确认，请核对该号码的申请状态。')
+                            submitted_form = getattr(form, 'window', form)
+                            print(f'QQ 号 {number}：已确认申请提交结束，不代表对方已通过。')
+                    else:
+                        skip_reason = '搜索结果中没有可点击的添加按钮'
+            except NumberActionError as error:
+                error_numbers.append(number)
+                needs_cleanup = True
+                if send_started:
+                    uncertain_numbers.append(number)
+                    skip_reason = f'发送待核对，已跳过且不再自动发送：{error}'
+                else:
+                    skip_reason = f'添加异常，已跳过（未执行发送）：{error}'
+                print(f'QQ {number}：{skip_reason}；记录后继续下一个号码。', flush=True)
 
+            if submitted_form is not None:
+                try:
+                    number_action(close_submitted_form, submitted_form, process_id, number)
+                except NumberActionError as error:
+                    skip_reason = f'申请已提交，关闭页面异常，已跳过：{error}'
+                    print(f'QQ {number}：{skip_reason}；记录后继续下一个号码。', flush=True)
+                    needs_cleanup = True
             if skip_reason:
                 journal.record(number, source_rows, 'processed', reason=skip_reason)
             else:
                 journal.record(number, source_rows, 'processed')
-            if submitted_form is not None:
-                close_submitted_form(submitted_form, window.process_id(), number)
             try:
                 save_marker(source_rows, reason=skip_reason)
             except Exception as error:
@@ -1504,6 +1521,13 @@ def main():
             print(f"已在号码所在行的 C 列标记“{PROCESSED_MARKER}”。")
             if skip_reason:
                 print(f'已在号码所在行的 D 列记录跳过原因：{skip_reason}。')
+            # A failed cleanup must not lose the saved skip or resubmit a request.
+            if needs_cleanup:
+                page = None
+                try:
+                    number_action(close_number_forms, desktop, process_id, number)
+                except NumberActionError as error:
+                    print(f'QQ {number} 的申请页暂未清理：{error}；下个号码重新定位搜索页。', flush=True)
             time.sleep(NUMBER_INTERVAL_SECONDS)
 
     print(
@@ -1515,7 +1539,9 @@ def main():
     if timeout_numbers:
         print("超时号码：" + ", ".join(timeout_numbers))
     if uncertain_numbers:
-        print('发送待核对号码：' + ', '.join(uncertain_numbers) + '；已保留记录，未标记完成。')
+        print('发送待核对号码：' + ', '.join(uncertain_numbers) + '；已记录 D 列并跳过，不会自动重发。')
+    if error_numbers:
+        print('异常跳过号码：' + ', '.join(error_numbers) + '；原因见号码表 D 列。')
     if queue is not None:
         pending = queue.pending_numbers()
         if not pending:

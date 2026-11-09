@@ -65,6 +65,30 @@ def run(output):
             finally:
                 open_qq_add_friend.NUMBER_FILE_PATH = original_path
         report['xlsx_ods'] = True
+        # Exercise the actual bundled scheduler with a fake worker and clock.
+        import io
+        import unittest
+        from test_add_repeat import RepeatTests
+        test_output = io.StringIO()
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(RepeatTests)
+        result = unittest.TextTestRunner(stream=test_output, verbosity=2).run(suite)
+        if not result.wasSuccessful():
+            raise RuntimeError('循环调度检查失败：' + test_output.getvalue())
+        report['repeat_schedule_tests'] = result.testsRun
+        # All QQ and persistence boundaries are mocked or use temporary files.
+        regression_names = [
+            'test_number_recovery', 'test_add_workflow', 'test_question_answer',
+            'test_qq_verification', 'test_send_resilience', 'test_add_progress',
+            'test_excel_sheet_sequence', 'test_add_sequence', 'test_direct_application',
+            'test_add_navigation', 'test_add_foreground', 'test_uia_refresh',
+            'test_excel_input',
+        ]
+        suite = unittest.defaultTestLoader.loadTestsFromNames(regression_names)
+        test_output = io.StringIO()
+        result = unittest.TextTestRunner(stream=test_output, verbosity=2).run(suite)
+        if not result.wasSuccessful():
+            raise RuntimeError('逐号异常恢复检查失败：' + test_output.getvalue())
+        report['number_recovery_tests'] = result.testsRun
         report['ok'] = True
     except BaseException as error:
         import traceback

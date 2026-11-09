@@ -1,5 +1,7 @@
 """Two configurable Windows apps sharing a Tk interface and worker controller."""
 from pathlib import Path
+from copy import deepcopy
+import math
 import json
 import os
 import re
@@ -9,6 +11,7 @@ import time
 from gui_config import fields, defaults, validate, load_config, save_config, state_home, config_path
 
 RUNNING_NOTICE = '正在操作 QQ，请暂时不要使用鼠标和键盘。'
+REPEAT_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 class App:
@@ -26,6 +29,10 @@ class App:
         self.smoke_report = None
         self.smoke_stopped = False
         self.smoke_seen = False
+        self.repeat_config = None
+        self.next_run_at = None
+        self.repeat_round = 0
+        self.wait_status = None
         from desktop_ui import build_interface
         build_interface(self)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -248,30 +255,94 @@ class App:
 
     def start(self):
         from tkinter import messagebox
-        if self.controller.running:
+        if self.closing or self.controller.running or self.repeat_config is not None:
             return
         try:
             config = self.collect(for_run=not self.test_mode)
             save_config(self.mode, config)
-            self.set_busy(True)
-            self.root.update_idletasks()
-            self.controller.start(config, simulate=self.test_mode)
-            self.status.set('运行中')
-            self.append_log(f'\n—— 开始任务 · {time.strftime("%H:%M:%S")} ——\n日志：{self.controller.log_path}\n')
-            self.append_log(RUNNING_NOTICE + '\n')
+            self.repeat_config = deepcopy(config)
+            self.repeat_round = 0
+            self.start_round()
         except Exception as error:
+            self.append_log(f'启动失败：{error}\n')
+            if self.schedule_next_round({'status': 'error'}):
+                return
+            self.cancel_repeat()
             self.set_busy(False)
             self.status.set('启动失败')
             if self.test_mode:
                 raise
             messagebox.showerror('无法开始', str(error), parent=self.root)
 
+    def cancel_repeat(self):
+        self.repeat_config = None
+        self.next_run_at = None
+        self.wait_status = None
+
+    def start_round(self):
+        self.next_run_at = None
+        self.wait_status = None
+        self.set_busy(True)
+        self.root.update_idletasks()
+        self.repeat_round += 1
+        self.controller.start(deepcopy(self.repeat_config), simulate=self.test_mode)
+        repeating = self.mode == 'add' and self.repeat_config.get('REPEAT_EVERY_24_HOURS', False)
+        label = f'第 {self.repeat_round} 轮运行中' if repeating else '运行中'
+        self.status.set(label)
+        self.append_log(f'\n—— 开始任务 · {time.strftime("%Y-%m-%d %H:%M:%S")} · {label} ——\n日志：{self.controller.log_path}\n')
+        self.append_log(RUNNING_NOTICE + '\n')
+
+    def schedule_next_round(self, result):
+        config = self.repeat_config
+        if (self.closing or self.mode != 'add' or not config
+                or not config.get('REPEAT_EVERY_24_HOURS', False)
+                or result.get('status') not in ('finished', 'error')):
+            return False
+        self.next_run_at = time.time() + REPEAT_INTERVAL_SECONDS
+        # The worker has exited and released the QQ mutex; only the UI timer remains.
+        self.running_notice.pack_forget()
+        self.progress.stop()
+        self.update_repeat_wait()
+        due = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.next_run_at))
+        outcome = '异常结束' if result.get('status') == 'error' or result.get('exit_code', 0) != 0 else '已结束'
+        self.append_log(f'第 {self.repeat_round} 轮{outcome}，等待 24 小时；下次开始：{due}。\n'
+                        '等待期间可正常使用电脑；请保持程序开启、电脑唤醒和 QQ 登录，点击“停止”可取消循环。\n')
+        return True
+
+    def update_repeat_wait(self):
+        if self.next_run_at is None or self.closing:
+            return
+        remaining = max(0, math.ceil(self.next_run_at - time.time()))
+        if remaining == 0:
+            try:
+                self.start_round()
+            except Exception as error:
+                self.append_log(f'第 {self.repeat_round} 轮启动失败：{error}\n')
+                if not self.schedule_next_round({'status': 'error'}):
+                    self.cancel_repeat()
+                    self.set_busy(False)
+                    self.status.set('启动失败，循环已停止')
+            return
+        hours, tail = divmod(remaining, 3600)
+        minutes, seconds = divmod(tail, 60)
+        due = time.strftime('%m-%d %H:%M:%S', time.localtime(self.next_run_at))
+        label = f'等待第 {self.repeat_round + 1} 轮 · {hours:02}:{minutes:02}:{seconds:02}\n下次开始：{due}'
+        if label != self.wait_status:
+            self.status.set(label)
+            self.wait_status = label
+
     def stop(self):
+        waiting = self.next_run_at is not None
+        self.cancel_repeat()
         if self.controller.running:
             self.controller.stop()
             self.stop_button.configure(state='disabled')
             self.status.set('正在停止…')
             self.append_log('已请求停止；后台若无响应，将在约 2 秒后强制结束。\n')
+        elif waiting:
+            self.set_busy(False)
+            self.status.set('已停止，循环已取消')
+            self.append_log('已取消等待和后续循环；再次点击“开始添加”才会重新运行。\n')
 
     def poll(self):
         text, result = self.controller.poll()
@@ -281,14 +352,17 @@ class App:
             self.smoke_seen = True
             self.root.after(200, self.stop_button.invoke)
         if result:
-            self.set_busy(False)
-            self.status.set({'finished': '流程已结束', 'stopped': '已停止', 'error': '运行失败'}.get(result['status'], '已结束'))
             self.append_log(result['message'] + '\n')
+            if not self.schedule_next_round(result):
+                self.cancel_repeat()
+                self.set_busy(False)
+                self.status.set({'finished': '流程已结束', 'stopped': '已停止', 'error': '运行失败'}.get(result['status'], '已结束'))
             if self.test_mode:
                 self.smoke_stopped = result['status'] == 'stopped'
                 self.smoke_report.write_text(json.dumps({'mode': self.mode, 'worker_started': self.smoke_seen, 'stopped': self.smoke_stopped, 'result': result, 'config_saved': config_path(self.mode).is_file()}, ensure_ascii=False, indent=2), encoding='utf-8')
                 self.root.after(200, self.root.destroy)
                 return
+        self.update_repeat_wait()
         if self.closing and not self.controller.running:
             self.controller.cleanup()
             self.root.destroy()
@@ -297,6 +371,7 @@ class App:
 
     def close(self):
         self.closing = True
+        self.cancel_repeat()
         if self.controller.running:
             self.stop()
             self.status.set('停止任务后关闭窗口…')

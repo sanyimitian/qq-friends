@@ -24,7 +24,7 @@ def fields(mode):
         'CLOSE_SECONDARY_WINDOWS': dict(group='高级设置', label='开始前关闭其他 QQ 页面'),
     }
     displayed = [replace(field, **presentation.get(field.key, {})) for field in config_fields(mode)]
-    order = ['NUMBER_FILE_PATH', 'TARGET_PROCESS_ID', 'NUMBERS_PER_ACCOUNT',
+    order = ['NUMBER_FILE_PATH', 'TARGET_PROCESS_ID', 'NUMBERS_PER_ACCOUNT', 'REPEAT_EVERY_24_HOURS',
              'VERIFICATION_MESSAGE', 'QUESTION_ANSWER', 'AUTO_SEND']
     return sorted(displayed, key=lambda field: order.index(field.key) if field.key in order else len(order))
 
@@ -109,7 +109,9 @@ def build_interface(app):
     app.start_button = button(app, actions, '开始添加' if mode == 'add' else '开始采集',
                               app.start, '保存设置并开始，进度会显示在运行记录里。', primary=True)
     app.start_button.pack(side='left')
-    app.stop_button = button(app, actions, '停止', app.stop, '结束任务，已保存的结果会保留。')
+    app.stop_button = button(app, actions, '停止', app.stop,
+                             '结束任务并取消后续循环，已保存的结果会保留。' if mode == 'add' else
+                             '结束任务，已保存的结果会保留。')
     app.stop_button.configure(state='disabled')
     app.stop_button.pack(side='left', padx=(8, 0))
     app.pause_button = None

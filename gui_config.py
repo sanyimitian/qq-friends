@@ -76,6 +76,7 @@ def fields(mode):
         Field('QQ_EXE', 'QQ 安装位置', 'exe', r'D:\01App\Tencent\QQNT\QQ.exe', hint='请先登录 QQ；程序通过已登录窗口操作。'),
         add_window,
         Field('NUMBERS_PER_ACCOUNT', '每个账号本次处理数量', 'int', 3, minimum=1, hint='每个账号处理一个批次；Excel 剩余不足此数时也会处理，不跨过未完成的工作表。'),
+        Field('REPEAT_EVERY_24_HOURS', '每轮结束后循环', 'bool', True, hint='正常结束或异常后都等待 24 小时再开始；保持程序开启，点击停止可取消循环。'),
         Field('EXCLUDED_QQ_ACCOUNTS', '不使用的 QQ 账号', 'lines', [], hint='每行一个 QQ 号；清空表示不排除。'),
         Field('VERIFICATION_MESSAGE', '加好友验证信息', 'multiline', DEFAULT_VERIFICATION_MESSAGE, hint='填写申请表单的验证信息，不修改好友备注。关闭自动发送时，填好后停留在申请表单。'),
         Field('AUTO_SEND', '自动点击申请表单的“发送”', 'bool', True, hint='勾选会实际发送申请。关闭时，在首个申请表单处结束且不标记该号码。'),

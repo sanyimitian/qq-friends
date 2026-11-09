@@ -86,6 +86,7 @@ class WorkflowHarness:
             'current_sheet_numbers': Mock(return_value={number for number, _ in self.numbers}),
             'prepare_verification_form': Mock(return_value=self.form),
             'close_submitted_form': Mock(),
+            'close_number_forms': Mock(),
             'cancel_unconfigured_form': Mock(return_value=True),
             'load_dependencies': Mock(return_value=self.dependencies),
             'find_qq_windows': Mock(return_value=self.windows),
@@ -323,16 +324,17 @@ class MainWorkflowTests(unittest.TestCase):
             harness.read_qq_account_from_avatar.assert_not_called()
             self.assert_no_search(harness)
 
-    def test_verification_failure_never_sends_or_marks(self):
+    def test_verification_failure_skips_without_sending(self):
         with WorkflowHarness([fake_window(441)], target=441) as harness:
             harness.search_number.side_effect = lambda *args: ('results', 1)
             harness.click_result_add_button.side_effect = lambda *args, **kwargs: True
             harness.prepare_verification_form.side_effect = RuntimeError('message truncated')
-            with self.assertRaisesRegex(RuntimeError, 'truncated'):
-                harness.run()
+            harness.run()
             harness.click_send_button.assert_not_called()
-            harness.mark_rows_processed.assert_not_called()
-            harness.journal.record.assert_not_called()
+            self.assertEqual(harness.search_number.call_count, 3)
+            self.assertEqual(harness.mark_rows_processed.call_count, 3)
+            self.assertTrue(all('truncated' in c.kwargs['reason']
+                                for c in harness.mark_rows_processed.call_args_list))
 
     def test_missing_verification_field_cancels_only_that_number_and_continues(self):
         window = fake_window(441)
@@ -358,27 +360,26 @@ class MainWorkflowTests(unittest.TestCase):
                 harness.mark_rows_processed.call_args_list[0].kwargs,
                 {
                     'reason': '申请页没有验证信息输入框，已取消且未发送',
-                    'mark_processed': False,
                 },
             )
-            self.assertEqual(harness.journal.record.call_args_list, [
+            self.assertEqual(harness.journal.record.call_args_list[1:], [
                 item for number, rows in harness.numbers[1:3]
                 for item in (call(number, rows, 'sending'), call(number, rows, 'processed'))])
-            self.assertNotIn(harness.numbers[0][0],
-                             [item.args[0] for item in harness.journal.record.call_args_list])
+            self.assertEqual(harness.journal.record.call_args_list[0].args,
+                             (harness.numbers[0][0], [1], 'processed'))
 
-    def test_unconfigured_form_cancel_failure_stops_without_marking(self):
+    def test_unconfigured_form_cancel_failure_skips_and_continues(self):
         with WorkflowHarness([fake_window(441)], target=441) as harness:
             form = Mock(name='unconfigured_form')
             harness.search_number.side_effect = lambda *args: ('results', 1)
             harness.click_result_add_button.side_effect = lambda *args, **kwargs: True
             harness.prepare_verification_form.side_effect = adding.NoVerificationField(form)
             harness.cancel_unconfigured_form.side_effect = RuntimeError('cancel unconfirmed')
-            with self.assertRaisesRegex(RuntimeError, 'cancel unconfirmed'):
-                harness.run()
+            harness.run()
             harness.click_send_button.assert_not_called()
-            harness.mark_rows_processed.assert_not_called()
-            harness.journal.record.assert_not_called()
+            self.assertEqual(harness.search_number.call_count, 3)
+            self.assertEqual(harness.mark_rows_processed.call_count, 3)
+            self.assertIn('cancel unconfirmed', harness.mark_rows_processed.call_args_list[0].kwargs['reason'])
 
     def test_journal_write_failure_prevents_send(self):
         with WorkflowHarness([fake_window(441)], target=441) as harness:

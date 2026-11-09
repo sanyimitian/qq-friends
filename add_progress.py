@@ -180,7 +180,8 @@ class AttemptJournal:
                 raise RuntimeError(f'号码表已保存，但恢复记录暂时无法清理：{self.path}。请再次开始以完成核对。') from error
         self.records = records
 
-    def recover(self, numbers, mark_callback, all_numbers=None, *, defer_uncertain=None):
+    def recover(self, numbers, mark_callback, all_numbers=None, *, defer_uncertain=None,
+                skip_uncertain=False):
         """Recover known attempts; block uncertain sends before any QQ interaction."""
         pending = dict(numbers)
         known = set(pending) if all_numbers is None else set(all_numbers)
@@ -194,7 +195,8 @@ class AttemptJournal:
                     f'恢复记录中的 QQ {number} 已不在当前工作表，已停止且未按旧行号写入。'
                     f'请核对号码表和恢复文件：{self.path}'
                 )
-            if number in pending and record['state'] == 'sending' and defer_uncertain is None:
+            if (number in pending and record['state'] == 'sending'
+                    and defer_uncertain is None and not skip_uncertain):
                 raise RuntimeError(
                     f'QQ {number} 上次可能已点击发送，程序不会自动重复发送。请先在 QQ 中核对；'
                     f'如已发送或希望跳过，请将该号码 C 列标为“{self.processed_marker}”并保存关闭表格；'
@@ -204,6 +206,13 @@ class AttemptJournal:
         for number in list(self.records):
             if number in pending and self.records[number]['state'] == 'sending':
                 reason = self.records[number].get('reason') or '上次已触发发送但结果未确认，待核对；不会自动重发'
+                if skip_uncertain:
+                    reason = '发送待核对，已跳过且不再自动发送：' + reason
+                    mark_callback(pending[number], reason)
+                    self.clear(number)
+                    print(f'QQ {number}：{reason}；已记录号码表，继续后续号码。', flush=True)
+                    recovered.add(number)
+                    continue
                 defer_uncertain(pending[number], reason)
                 print(f'QQ {number} 的发送结果待核对，本次不重复发送，继续同表其他号码。', flush=True)
                 recovered.add(number)

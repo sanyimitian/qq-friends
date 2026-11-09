@@ -49,7 +49,7 @@
     "test_capture_resume.py": "56c3f2d21955127cf0635c6a029c3af7e65669a992cbf2d7bec7fb1e5dae07b9",
     "test_desktop_apps.py": "d1cc21d3723cb7a40405283de96998c232f0e51f8c58a31cd95b072ee89f3af5",
     "test_zq_qq_sections.py": "b5627661586513711f0bc52977e7a1065c6b38dec76d52aee6c5993d272b2797",
-    "zq_qq_001.py": "82c7046aeaeac80014921654d4eb0296f7c8610d50bc355c0f86683856022ebb",
+    "zq_qq_001.py": "d1b53647a1431116e888a36f8ce358639fc7c118651c0b557ee8e936595cb7fc",
     "test_capture_ready.py": "2625704a032ae1b11651fb0163fa764e75df9e5b0738fefb1e1acb0bd35b9646",
     "README.md": "4226edc458c1c5c288c32ce92366bcd95845f93dc1d68737d692deb355136b9c"
   },
@@ -75,5 +75,6 @@
   },
   "append_and_ready_verification": "../build/foreground_fix/acceptance_append.json",
   "profile_latency_verification": "../build/profile_latency/live_check.json",
-  "completed_skip_verification": "../build/completed_skip/verification.json"
+  "completed_skip_verification": "../build/completed_skip/verification.json",
+  "excluded_groups_verification": "../build/excluded_groups_20261109/installed.json"
 }

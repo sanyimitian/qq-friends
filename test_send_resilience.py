@@ -216,17 +216,18 @@ class WorkflowResilienceTests(unittest.TestCase):
         harness.search_number.side_effect = lambda *args: ('results', 1)
         harness.click_result_add_button.side_effect = lambda *args, **kwargs: True
 
-    def test_uncertain_send_is_recorded_unmarked_and_next_number_runs(self):
+    def test_uncertain_send_is_recorded_skipped_and_next_number_runs(self):
         with WorkflowHarness([fake_window(441)], target=441) as h:
             self.setup_sends(h)
             h.click_send_button.side_effect = [v.SendUnconfirmed('待核对'), True, True]
             h.run()
             self.assertEqual(h.click_send_button.call_count, 3)
             first = h.mark_rows_processed.call_args_list[0]
-            self.assertFalse(first.kwargs['mark_processed'])
+            self.assertTrue(first.kwargs.get('mark_processed', True))
             self.assertIn('待核对', first.kwargs['reason'])
-            self.assertEqual(h.journal.clear.call_count, 2)
-            self.assertEqual(h.close_submitted_form.call_count, 3)
+            self.assertEqual(h.journal.clear.call_count, 3)
+            self.assertEqual(h.close_submitted_form.call_count, 2)
+            self.assertEqual(h.close_number_forms.call_count, 1)
 
     def test_restriction_stops_before_next_number(self):
         with WorkflowHarness([fake_window(441)], target=441) as h:
@@ -238,15 +239,15 @@ class WorkflowResilienceTests(unittest.TestCase):
             h.journal.clear.assert_not_called()
             h.close_submitted_form.assert_not_called()
 
-    def test_cannot_close_unconfirmed_form_stops_without_resending(self):
+    def test_cannot_close_unconfirmed_form_continues_without_resending(self):
         with WorkflowHarness([fake_window(441)], target=441) as h:
             self.setup_sends(h)
             h.click_send_button.side_effect = v.SendUnconfirmed('待核对')
-            h.close_submitted_form.side_effect = RuntimeError('still open')
-            with self.assertRaisesRegex(RuntimeError, '无法安全关闭'):
-                h.run()
-            self.assertEqual(h.click_send_button.call_count, 1)
-            h.journal.clear.assert_not_called()
+            h.close_number_forms.side_effect = RuntimeError('still open')
+            h.run()
+            self.assertEqual(h.click_send_button.call_count, 3)
+            self.assertEqual(len({c.kwargs['expected_number'] for c in h.click_send_button.call_args_list}), 3)
+            self.assertEqual(h.journal.clear.call_count, 3)
 
 
 if __name__ == '__main__':

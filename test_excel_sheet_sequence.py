@@ -136,27 +136,25 @@ class SheetSequenceTests(unittest.TestCase):
             self.assertEqual(self.searched(harness), ['100002'])
         self.assertEqual(self.read()[1]['First']['C1'].value, adding.PROCESSED_MARKER)
 
-    def test_timeout_keeps_current_sheet_pending_and_blocks_next_sheet(self):
+    def test_timeout_is_skipped_before_next_sheet(self):
         self.workbook([('First', [['100001'], ['100002']]), ('Second', [['100003']])])
         with self.workflow() as harness:
-            harness.search_number.side_effect = [('timeout', 3), ('no_results', 1)]
-            with self.assertRaisesRegex(RuntimeError, 'First.*未处理'):
-                harness.run()
-            self.assertEqual(self.searched(harness), ['100001', '100002'])
+            harness.search_number.side_effect = [('timeout', 3), ('no_results', 1), ('no_results', 1)]
+            harness.run()
+            self.assertEqual(self.searched(harness), ['100001', '100002', '100003'])
         _, book, _, _ = self.read()
-        self.assertIsNone(book['First']['C1'].value)
+        self.assertEqual(book['First']['C1'].value, adding.PROCESSED_MARKER)
         self.assertIn('超时', book['First']['D1'].value)
-        self.assertIsNone(book['Second']['C1'].value)
+        self.assertEqual(book['Second']['C1'].value, adding.PROCESSED_MARKER)
 
-    def test_unconfigured_form_blocks_next_sheet(self):
+    def test_unconfigured_form_is_skipped_and_next_sheet_runs(self):
         self.workbook([('First', [['100001']]), ('Second', [['100002']])])
         with self.workflow() as harness:
             harness.search_number.side_effect = lambda *args: ('results', 1)
             harness.click_result_add_button.side_effect = lambda *args, **kwargs: True
             harness.prepare_verification_form.side_effect = adding.NoVerificationField(Mock())
-            with self.assertRaisesRegex(RuntimeError, 'First.*未处理'):
-                harness.run()
-            self.assertEqual(self.searched(harness), ['100001'])
+            harness.run()
+            self.assertEqual(self.searched(harness), ['100001', '100002'])
             harness.click_send_button.assert_not_called()
 
     def test_failed_save_stops_before_next_number_and_keeps_recovery_record(self):
@@ -187,7 +185,7 @@ class SheetSequenceTests(unittest.TestCase):
 
 
 
-    def test_uncertain_sends_are_deferred_without_marking_or_resending(self):
+    def test_uncertain_sends_are_skipped_without_resending(self):
         for title in ['First', 'Second']:
             with self.subTest(sheet=title):
                 first_status = adding.PROCESSED_MARKER if title == 'Second' else None
@@ -196,31 +194,26 @@ class SheetSequenceTests(unittest.TestCase):
                 journal = AttemptJournal(self.path, title)
                 journal.record(number, [1], 'sending')
                 with self.workflow() as harness:
-                    if title == 'First':
-                        with self.assertRaisesRegex(RuntimeError, 'First.*未处理'):
-                            harness.run()
-                    else:
-                        harness.run()
-                    harness.search_number.assert_not_called()
+                    harness.run()
+                    self.assertEqual(self.searched(harness), ['100002'] if title == 'First' else [])
+                    harness.click_send_button.assert_not_called()
                 book = self.read()[1]
-                self.assertIsNone(book[title]['C1'].value)
+                self.assertEqual(book[title]['C1'].value, adding.PROCESSED_MARKER)
                 self.assertIn('待核对', book[title]['D1'].value)
-                self.assertEqual(AttemptJournal(self.path, title).records[number]['state'], 'sending')
-                journal.clear(number)
+                self.assertEqual(AttemptJournal(self.path, title).records, {})
 
-    def test_deferred_send_continues_same_sheet_and_blocks_later_sheet(self):
+    def test_deferred_send_continues_same_sheet_and_later_sheet(self):
         self.workbook([('First', [['100001'], ['100002']]), ('Second', [['100003']])])
         journal = AttemptJournal(self.path, 'First')
         journal.record('100001', [1], 'sending')
         with self.workflow() as harness:
-            with self.assertRaisesRegex(RuntimeError, 'First.*未处理'):
-                harness.run()
-            self.assertEqual(self.searched(harness), ['100002'])
+            harness.run()
+            self.assertEqual(self.searched(harness), ['100002', '100003'])
         book = self.read()[1]
-        self.assertIsNone(book['First']['C1'].value)
+        self.assertEqual(book['First']['C1'].value, adding.PROCESSED_MARKER)
         self.assertIn('待核对', book['First']['D1'].value)
         self.assertEqual(book['First']['C2'].value, adding.PROCESSED_MARKER)
-        self.assertIsNone(book['Second']['C1'].value)
+        self.assertEqual(book['Second']['C1'].value, adding.PROCESSED_MARKER)
 
     def test_manually_confirmed_pending_record_releases_next_sheet(self):
         self.workbook([('First', [['100001', None, adding.PROCESSED_MARKER]]),
@@ -235,20 +228,19 @@ class SheetSequenceTests(unittest.TestCase):
     def test_new_uncertain_send_remains_durable_while_same_sheet_continues(self):
         self.workbook([('First', [['100001'], ['100002']]), ('Second', [['100003']])])
         with self.workflow() as harness:
-            harness.search_number.side_effect = [('results', 1), ('no_results', 1)]
+            harness.search_number.side_effect = [('results', 1), ('no_results', 1), ('no_results', 1)]
             harness.click_result_add_button.side_effect = lambda *args, **kwargs: True
             harness.click_send_button.side_effect = adding.SendUnconfirmed('待核对')
-            with self.assertRaisesRegex(RuntimeError, 'First.*未处理'):
-                harness.run()
-            self.assertEqual(self.searched(harness), ['100001', '100002'])
+            harness.run()
+            self.assertEqual(self.searched(harness), ['100001', '100002', '100003'])
             self.assertEqual(harness.click_send_button.call_count, 1)
         journal = AttemptJournal(self.path, 'First')
-        self.assertEqual(set(journal.records), {'100001'})
-        self.assertEqual(journal.records['100001']['state'], 'sending')
+        self.assertEqual(journal.records, {})
         book = self.read()[1]
-        self.assertIsNone(book['First']['C1'].value)
+        self.assertEqual(book['First']['C1'].value, adding.PROCESSED_MARKER)
+        self.assertIn('待核对', book['First']['D1'].value)
         self.assertEqual(book['First']['C2'].value, adding.PROCESSED_MARKER)
-        self.assertIsNone(book['Second']['C1'].value)
+        self.assertEqual(book['Second']['C1'].value, adding.PROCESSED_MARKER)
 
 
     def test_deleted_recovery_sheet_is_not_replaced_by_same_number_elsewhere(self):

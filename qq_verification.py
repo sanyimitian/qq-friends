@@ -542,6 +542,33 @@ def close_submitted_form(window, process_id, expected_number, timeout=3):
     _wait_form_closed(window, handle, timeout, action='关闭')
 
 
+def close_number_forms(desktop, process_id, expected_number):
+    """Best-effort cleanup of this skipped target; never click Send."""
+    _validate_expected_number(expected_number)
+    if expected_number is None:
+        raise ValueError('关闭申请页必须提供目标 QQ 号码。')
+    closed = set()
+    for window in desktop.windows():
+        check_stop()
+        try:
+            if (window.process_id() != process_id or not window.is_visible()
+                    or window.window_text().strip() not in _APPLICATION_TITLES):
+                continue
+            texts = _visible_texts(window)
+            if _FORM_LABEL not in texts or expected_number not in texts:
+                continue
+            handle = getattr(window, 'handle', None)
+            key = ('handle', handle) if type(handle) is int and handle > 0 else ('object', id(window))
+            if key in closed:
+                continue
+            closed.add(key)
+            close_submitted_form(window, process_id, expected_number)
+        except Exception as error:
+            if type(error).__name__ == 'FailSafeException':
+                raise
+            print(f'申请页清理未完成：{type(error).__name__}: {error}；继续尝试恢复搜索页面。', flush=True)
+
+
 def _validate_unconfigured_form(window, process_id, expected_number):
     _validate_expected_number(expected_number)
     try:

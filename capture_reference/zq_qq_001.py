@@ -2703,6 +2703,14 @@ def main():  # 执行 QQ 群聊面板查看主流程。
 
         for name, _row in new_rows:
             check_pause()
+            # Apply the saved exclusions before opening a profile or counting a group.
+            if name in EXCLUDED_CHAT_NAMES:
+                seen_names.add(name)
+                pending_retry_names.discard(name)
+                session_retry_counts.pop(name, None)
+                excluded_chat_count += 1
+                print(f"群聊“{name}”在排除名单中，已跳过。")
+                continue
             if name not in pending_retry_names:
                 checked_group_count += 1
             print(f"进度：按列表顺序检查第 {checked_group_count} 个群聊：{name}")

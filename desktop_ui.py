@@ -24,7 +24,7 @@ def fields(mode):
         'CLOSE_SECONDARY_WINDOWS': dict(group='高级设置', label='开始前关闭其他 QQ 页面'),
     }
     displayed = [replace(field, **presentation.get(field.key, {})) for field in config_fields(mode)]
-    order = ['NUMBER_FILE_PATH', 'TARGET_PROCESS_ID', 'NUMBERS_PER_ACCOUNT', 'REPEAT_EVERY_24_HOURS',
+    order = ['NUMBER_FILE_PATH', 'TARGET_PROCESS_ID', 'NUMBERS_PER_ACCOUNT', 'REPEAT_EVERY_24_HOURS', 'REPEAT_INTERVAL_HOURS',
              'VERIFICATION_MESSAGE', 'QUESTION_ANSWER', 'AUTO_SEND']
     return sorted(displayed, key=lambda field: order.index(field.key) if field.key in order else len(order))
 

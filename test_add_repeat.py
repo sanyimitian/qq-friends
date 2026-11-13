@@ -1,4 +1,5 @@
-"""Exercise daily scheduling with a fake clock and worker; never operate QQ."""
+"""Exercise configurable scheduling with a fake clock and worker; never operate QQ."""
+import json
 import os
 import tempfile
 import unittest
@@ -86,8 +87,10 @@ class RepeatTests(unittest.TestCase):
         self.assertIsNone(self.app.next_run_at)
 
     def test_successive_rounds_wait_again_and_keep_original_settings(self):
+        self.config['REPEAT_INTERVAL_HOURS'] = 1.5
         self.app.start()
         expected = deepcopy(self.config)
+        self.config['REPEAT_INTERVAL_HOURS'] = 8
         self.config['NUMBERS_PER_ACCOUNT'] = 999
         self.config['EXCLUDED_QQ_ACCOUNTS'].append('123456789')
         for round_number in range(1, 5):
@@ -95,12 +98,73 @@ class RepeatTests(unittest.TestCase):
             finished_at = self.clock.return_value
             self.app.controller.finish()
             self.app.poll()
-            self.assertEqual(self.app.next_run_at, finished_at + 86400)
+            self.assertEqual(self.app.next_run_at, finished_at + 5400)
             self.clock.return_value = self.app.next_run_at
             self.app.poll()
             self.app.poll()
             self.assertEqual(self.app.repeat_round, round_number + 1)
         self.assertEqual(self.app.controller.started, [expected] * 5)
+
+    def test_custom_interval_controls_due_time_countdown_and_log(self):
+        for hours, countdown in [(0.01, '00:00:36'), (0.5, '00:30:00'),
+                                 (12, '12:00:00'), (48, '48:00:00'), (8760, '8760:00:00')]:
+            with self.subTest(hours=hours):
+                self.config['REPEAT_INTERVAL_HOURS'] = hours
+                due = self.begin_wait()
+                self.assertEqual(due, self.clock.return_value + hours * 3600)
+                self.assertIn(countdown, self.app.status.set.call_args.args[0])
+                self.assertIn(f'等待 {hours:g} 小时', self.app.append_log.call_args.args[0])
+                started = len(self.app.controller.started)
+                self.clock.return_value = due - 0.1
+                self.app.poll()
+                self.assertEqual(len(self.app.controller.started), started)
+                self.clock.return_value = due
+                self.app.poll()
+                self.app.poll()
+                self.assertEqual(len(self.app.controller.started), started + 1)
+                self.app.stop()
+                self.app.poll()
+
+    def test_custom_interval_applies_to_failure_and_error_paths(self):
+        self.config['REPEAT_INTERVAL_HOURS'] = 0.5
+        self.app.controller.failure = OSError('模拟启动失败')
+        with patch('tkinter.messagebox.showerror'):
+            self.app.start()
+        self.assertEqual(self.app.next_run_at, self.clock.return_value + 1800)
+        due = self.app.next_run_at
+        self.clock.return_value = due
+        self.app.poll()
+        self.assertEqual(self.app.next_run_at, due + 1800)
+        self.app.controller.failure = None
+        for status, code in [('error', 1), ('finished', 1)]:
+            self.clock.return_value = self.app.next_run_at
+            self.app.poll()
+            self.clock.return_value += 37
+            self.app.controller.finish(status, code)
+            self.app.poll()
+            self.assertEqual(self.app.next_run_at, self.clock.return_value + 1800)
+
+    def test_old_config_without_interval_still_schedules_24_hours(self):
+        self.config.pop('REPEAT_INTERVAL_HOURS')
+        due = self.begin_wait()
+        self.assertEqual(due, self.clock.return_value + 86400)
+
+    def test_interval_validation_and_saved_settings(self):
+        self.assertEqual(gui_config.validate('add', {})['REPEAT_INTERVAL_HOURS'], 24)
+        self.assertNotIn('REPEAT_INTERVAL_HOURS', gui_config.defaults('capture'))
+        for invalid in ('', 'abc', 'nan', 'inf', '-inf', 0, -1, 0.001, 8760.1, 1e308):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, '循环间隔'):
+                    gui_config.validate('add', dict(self.config, REPEAT_INTERVAL_HOURS=invalid))
+        old = dict(self.config, REPEAT_EVERY_24_HOURS=False)
+        old.pop('REPEAT_INTERVAL_HOURS')
+        gui_config.config_path('add').write_text(json.dumps(old), encoding='utf-8')
+        loaded = gui_config.load_config('add')
+        self.assertEqual(loaded['REPEAT_INTERVAL_HOURS'], 24)
+        self.assertFalse(loaded['REPEAT_EVERY_24_HOURS'])
+        for interval in (' 0.5 ', '12', '48'):
+            gui_config.save_config('add', dict(self.config, REPEAT_INTERVAL_HOURS=interval))
+            self.assertEqual(gui_config.load_config('add')['REPEAT_INTERVAL_HOURS'], float(interval))
 
     def test_sleep_resume_starts_only_one_round_when_overdue(self):
         due = self.begin_wait()

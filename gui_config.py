@@ -76,7 +76,8 @@ def fields(mode):
         Field('QQ_EXE', 'QQ 安装位置', 'exe', r'D:\01App\Tencent\QQNT\QQ.exe', hint='请先登录 QQ；程序通过已登录窗口操作。'),
         add_window,
         Field('NUMBERS_PER_ACCOUNT', '每个账号本次处理数量', 'int', 3, minimum=1, hint='每个账号处理一个批次；Excel 剩余不足此数时也会处理，不跨过未完成的工作表。'),
-        Field('REPEAT_EVERY_24_HOURS', '每轮结束后循环', 'bool', True, hint='正常结束或异常后都等待 24 小时再开始；保持程序开启，点击停止可取消循环。'),
+        Field('REPEAT_EVERY_24_HOURS', '每轮结束后循环', 'bool', True, hint='按下方间隔自动开始下一轮；保持程序开启，点击停止可取消循环。'),
+        Field('REPEAT_INTERVAL_HOURS', '循环间隔（小时）', 'float', 24.0, minimum=0.01, hint='默认 24 小时，可填小数（0.01～8760）；从每轮结束或启动失败时计时。'),
         Field('EXCLUDED_QQ_ACCOUNTS', '不使用的 QQ 账号', 'lines', [], hint='每行一个 QQ 号；清空表示不排除。'),
         Field('VERIFICATION_MESSAGE', '加好友验证信息', 'multiline', DEFAULT_VERIFICATION_MESSAGE, hint='填写申请表单的验证信息，不修改好友备注。关闭自动发送时，填好后停留在申请表单。'),
         Field('AUTO_SEND', '自动点击申请表单的“发送”', 'bool', True, hint='勾选会实际发送申请。关闭时，在首个申请表单处结束且不标记该号码。'),
@@ -156,6 +157,8 @@ def validate(mode, raw, for_run=False):
         except (ValueError, TypeError, re.error) as error:
             raise ValueError(f'{field.label}：{error}') from error
     if mode == 'add':
+        if output['REPEAT_INTERVAL_HOURS'] > 8760:
+            raise ValueError('循环间隔（小时）：应不大于 8760（365 天）')
         for account in output['EXCLUDED_QQ_ACCOUNTS']:
             if not re.fullmatch(r'[0-9]{5,12}', account):
                 raise ValueError('排除账号必须是 5～12 位纯数字 QQ 号')

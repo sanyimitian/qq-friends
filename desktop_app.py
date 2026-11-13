@@ -298,14 +298,15 @@ class App:
                 or not config.get('REPEAT_EVERY_24_HOURS', False)
                 or result.get('status') not in ('finished', 'error')):
             return False
-        self.next_run_at = time.time() + REPEAT_INTERVAL_SECONDS
+        interval_hours = config.get('REPEAT_INTERVAL_HOURS', REPEAT_INTERVAL_SECONDS / 3600)
+        self.next_run_at = time.time() + interval_hours * 3600
         # The worker has exited and released the QQ mutex; only the UI timer remains.
         self.running_notice.pack_forget()
         self.progress.stop()
         self.update_repeat_wait()
         due = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.next_run_at))
         outcome = '异常结束' if result.get('status') == 'error' or result.get('exit_code', 0) != 0 else '已结束'
-        self.append_log(f'第 {self.repeat_round} 轮{outcome}，等待 24 小时；下次开始：{due}。\n'
+        self.append_log(f'第 {self.repeat_round} 轮{outcome}，等待 {interval_hours:g} 小时；下次开始：{due}。\n'
                         '等待期间可正常使用电脑；请保持程序开启、电脑唤醒和 QQ 登录，点击“停止”可取消循环。\n')
         return True
 
